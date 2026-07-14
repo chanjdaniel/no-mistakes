@@ -12,7 +12,7 @@ func TestUpdateCommandDevBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update failed: %v\noutput: %s", err, out)
 	}
-	if !strings.Contains(out, "self-update unavailable for development builds") {
+	if !strings.Contains(out, "self-update is disabled for fork builds") {
 		t.Fatalf("unexpected update output: %s", out)
 	}
 }
@@ -24,7 +24,7 @@ func TestUpdateCommandBetaFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update --beta failed: %v\noutput: %s", err, out)
 	}
-	if !strings.Contains(out, "self-update unavailable for development builds") {
+	if !strings.Contains(out, "self-update is disabled for fork builds") {
 		t.Fatalf("unexpected update output: %s", out)
 	}
 }
@@ -36,7 +36,7 @@ func TestUpdateCommandYesFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update -y failed: %v\noutput: %s", err, out)
 	}
-	if !strings.Contains(out, "self-update unavailable for development builds") {
+	if !strings.Contains(out, "self-update is disabled for fork builds") {
 		t.Fatalf("unexpected update output: %s", out)
 	}
 }

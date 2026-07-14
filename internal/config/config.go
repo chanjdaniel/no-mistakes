@@ -149,6 +149,9 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	c.Agent = firstAgent(raw.Agent)
 	c.Agents = copyAgents(raw.Agent)
+	if err := validateAgentModelSteps(raw.AgentModel); err != nil {
+		return fmt.Errorf("repo config: %w", err)
+	}
 	c.AgentModel = raw.AgentModel
 	c.Commands = raw.Commands
 	c.IgnorePatterns = raw.IgnorePatterns
@@ -740,6 +743,63 @@ func validateAgentArgsOverride(override map[string][]string) error {
 	return nil
 }
 
+// agentModelSteps lists the pipeline step names that consume the per-step
+// model override from agent_model. A step name appearing in agent_model for
+// a step not listed here is rejected at load time, because a silently inert
+// config key is worse than a loud error.
+var agentModelSteps = map[string]bool{
+	string(types.StepReview):   true,
+	string(types.StepTest):     true,
+	string(types.StepDocument): true,
+	string(types.StepLint):     true,
+}
+
+// validAgentModelStepNames builds a sorted comma-separated string of the
+// allowed step names for error messages.
+func validAgentModelStepNames() string {
+	s := make([]string, 0, len(agentModelSteps))
+	for k := range agentModelSteps {
+		s = append(s, k)
+	}
+	return strings.Join(s, ", ")
+}
+
+// validateAgentModelSteps checks that every step name in every agent's
+// agent_model configuration is a known step that supports per-step model
+// routing. Unknown or unsupported step names are rejected.
+func validateAgentModelSteps(agentModel map[string]map[string]string) error {
+	if agentModel == nil {
+		return nil
+	}
+	valid := validAgentModelStepNames()
+	for agent, steps := range agentModel {
+		for step := range steps {
+			if !agentModelSteps[step] {
+				return fmt.Errorf("unknown step name %q in agent_model.%s (valid: %s)", step, agent, valid)
+			}
+		}
+	}
+	return validateAgentModelValues(agentModel)
+}
+
+// validateAgentModelValues checks that every non-empty model string is in
+// "provider/model" format. A malformed value is rejected at load time rather
+// than silently running on the default model.
+func validateAgentModelValues(agentModel map[string]map[string]string) error {
+	for agent, steps := range agentModel {
+		for step, model := range steps {
+			if model == "" {
+				continue
+			}
+			idx := strings.Index(model, "/")
+			if idx < 1 || idx == len(model)-1 {
+				return fmt.Errorf("model value in agent_model.%s.%s must be in \"provider/model\" format, got %q", agent, step, model)
+			}
+		}
+	}
+	return nil
+}
+
 // EnsureDefaultGlobalConfig writes the default config file at path if it does
 // not already exist. Failures are logged at debug level and silently ignored.
 func EnsureDefaultGlobalConfig(path string) {
@@ -810,6 +870,9 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 		cfg.AgentArgsOverride = raw.AgentArgsOverride
 	}
 	if raw.AgentModel != nil {
+		if err := validateAgentModelSteps(raw.AgentModel); err != nil {
+			return nil, err
+		}
 		cfg.AgentModel = raw.AgentModel
 	}
 	timeoutValue := raw.CITimeout

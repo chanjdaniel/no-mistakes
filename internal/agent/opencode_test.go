@@ -520,3 +520,169 @@ func TestOpencodeAgent_StructuredOutputError(t *testing.T) {
 		t.Errorf("error must not embed the reasoning prose snippet, got %q", msg)
 	}
 }
+
+func TestParseModelString(t *testing.T) {
+	tests := []struct {
+		input          string
+		wantProviderID string
+		wantModelID    string
+		wantErr        bool
+	}{
+		{"", "", "", false},
+		{"deepseek/deepseek-v4-flash", "deepseek", "deepseek-v4-flash", false},
+		{"openai/gpt-4o", "openai", "gpt-4o", false},
+		{"no-slash", "", "", true},
+		{"/empty-provider", "", "", true},
+		{"empty-model/", "", "", true},
+	}
+	for _, tc := range tests {
+		providerID, modelID, err := parseModelString(tc.input)
+		if tc.wantErr && err == nil {
+			t.Errorf("parseModelString(%q) expected error, got nil", tc.input)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("parseModelString(%q) unexpected error: %v", tc.input, err)
+		}
+		if providerID != tc.wantProviderID {
+			t.Errorf("parseModelString(%q) providerID = %q, want %q", tc.input, providerID, tc.wantProviderID)
+		}
+		if modelID != tc.wantModelID {
+			t.Errorf("parseModelString(%q) modelID = %q, want %q", tc.input, modelID, tc.wantModelID)
+		}
+	}
+}
+
+// TestOpencodeAgent_SendMessageBodyMatchesSchema verifies that the request
+// body sent to POST /session/{id}/message matches opencode's documented API
+// schema: model is a root-level {providerID, modelID} object and there is no
+// legacy info or role nesting. format is NOT sent at root level because it
+// enables server-side structured-output enforcement (tool_choice) that the
+// DeepSeek API rejects; prompt-based schema instructions carry it instead.
+func TestOpencodeAgent_SendMessageBodyMatchesSchema(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/session" && r.Method == http.MethodPost:
+			fmt.Fprint(w, `{"id":"s1"}`)
+		case r.URL.Path == "/session/s1/message" && r.Method == http.MethodPost:
+			decoded := json.NewDecoder(r.Body)
+			if err := decoded.Decode(&capturedBody); err != nil {
+				t.Errorf("failed to decode request body: %v", err)
+			}
+			fmt.Fprint(w, `{"info":{"id":"msg1","role":"assistant"},"parts":[{"type":"text","text":"{}"}]}`)
+		case r.URL.Path == "/session/s1" && r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusOK)
+		case r.URL.Path == "/global/event" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"payload\":{\"type\":\"session.idle\"}}\n\n")
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	a := &opencodeAgent{
+		bin:    "opencode",
+		server: &managedServer{port: mustParsePort(server.URL)},
+	}
+
+	_, err := a.Run(context.Background(), RunOpts{
+		Prompt:     "test",
+		CWD:        t.TempDir(),
+		JSONSchema: json.RawMessage(`{"type":"object"}`),
+		Model:      "deepseek/deepseek-v4-flash",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Body must not contain legacy "info" or "role" keys.
+	if _, ok := capturedBody["info"]; ok {
+		t.Error("body must not contain 'info' key (deprecated nesting)")
+	}
+	if _, ok := capturedBody["role"]; ok {
+		t.Error("body must not contain 'role' key (not in opencode schema)")
+	}
+
+	// Model must be a root-level object with providerID and modelID.
+	modelVal, ok := capturedBody["model"]
+	if !ok {
+		t.Fatal("body must contain root-level 'model' key")
+	}
+	modelObj, ok := modelVal.(map[string]any)
+	if !ok {
+		t.Fatalf("model must be an object, got %T", modelVal)
+	}
+	if modelObj["providerID"] != "deepseek" {
+		t.Errorf("model.providerID = %q, want \"deepseek\"", modelObj["providerID"])
+	}
+	if modelObj["modelID"] != "deepseek-v4-flash" {
+		t.Errorf("model.modelID = %q, want \"deepseek-v4-flash\"", modelObj["modelID"])
+	}
+
+	// format must NOT be at the root — server-side enforcement breaks
+	// DeepSeek ("Thinking mode does not support this tool_choice").
+	if _, ok := capturedBody["format"]; ok {
+		t.Error("body must not contain root-level 'format' key (breaks DeepSeek; prompt-based schema instructions carry it)")
+	}
+}
+
+// TestOpencodeAgent_SendMessageNoModelNoSchema asserts the body is correct
+// when no model override or schema is provided.
+func TestOpencodeAgent_SendMessageNoModelNoSchema(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/session" && r.Method == http.MethodPost:
+			fmt.Fprint(w, `{"id":"s1"}`)
+		case r.URL.Path == "/session/s1/message" && r.Method == http.MethodPost:
+			decoded := json.NewDecoder(r.Body)
+			if err := decoded.Decode(&capturedBody); err != nil {
+				t.Errorf("failed to decode request body: %v", err)
+			}
+			fmt.Fprint(w, `{"info":{"id":"msg1","role":"assistant"},"parts":[{"type":"text","text":"done"}]}`)
+		case r.URL.Path == "/session/s1" && r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusOK)
+		case r.URL.Path == "/global/event" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"payload\":{\"type\":\"session.idle\"}}\n\n")
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	a := &opencodeAgent{
+		bin:    "opencode",
+		server: &managedServer{port: mustParsePort(server.URL)},
+	}
+
+	_, err := a.Run(context.Background(), RunOpts{
+		Prompt: "test",
+		CWD:    t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, ok := capturedBody["info"]; ok {
+		t.Error("body must not contain 'info' key")
+	}
+	if _, ok := capturedBody["role"]; ok {
+		t.Error("body must not contain 'role' key")
+	}
+	if _, ok := capturedBody["model"]; ok {
+		t.Error("body must not contain 'model' key when no model override set")
+	}
+	if _, ok := capturedBody["format"]; ok {
+		t.Error("body must not contain 'format' key when no schema provided")
+	}
+	parts, ok := capturedBody["parts"]
+	if !ok {
+		t.Fatal("body must contain 'parts' key")
+	}
+	partsArr, ok := parts.([]any)
+	if !ok || len(partsArr) < 1 {
+		t.Fatal("parts must be a non-empty array")
+	}
+}
