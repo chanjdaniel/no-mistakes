@@ -81,17 +81,23 @@ func (a *opencodeAgent) connectEventStream(ctx context.Context, baseURL string) 
 	return resp.Body, nil
 }
 
-func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, prompt string, schema json.RawMessage) (*opencodeMessageResponse, error) {
+func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, prompt string, schema json.RawMessage, model string) (*opencodeMessageResponse, error) {
 	body := map[string]any{
 		"role":  "user",
 		"parts": []map[string]string{{"type": "text", "text": prompt}},
 	}
-	if len(schema) > 0 {
-		body["format"] = map[string]any{
-			"type":       "json_schema",
-			"schema":     json.RawMessage(schema),
-			"retryCount": 2,
+	if len(schema) > 0 || model != "" {
+		info := map[string]any{}
+		if len(schema) > 0 {
+			info["format"] = map[string]any{
+				"type":   "json_schema",
+				"schema": json.RawMessage(schema),
+			}
 		}
+		if model != "" {
+			info["model"] = model
+		}
+		body["info"] = info
 	}
 
 	respBytes, err := doJSON(ctx, http.MethodPost, baseURL+"/session/"+sessionID+"/message", nil, body)

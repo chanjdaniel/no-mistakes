@@ -78,7 +78,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 	defer msgCancel()
 	msgCh := make(chan messageResult, 1)
 	go func() {
-		resp, err := a.sendMessage(msgCtx, baseURL, sessionID, prompt, opts.JSONSchema)
+		resp, err := a.sendMessage(msgCtx, baseURL, sessionID, prompt, opts.JSONSchema, opts.Model)
 		msgCh <- messageResult{resp: resp, err: err}
 	}()
 

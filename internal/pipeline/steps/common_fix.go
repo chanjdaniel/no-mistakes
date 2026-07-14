@@ -19,6 +19,7 @@ type fixExecutionOptions struct {
 	Prompt                  string
 	ErrorPrefix             string
 	FallbackSummary         string
+	Model                   string
 	AfterAgentRun           func(*agent.Result) error
 	// SessionRole, when set, runs the fix turn in that durable review-loop
 	// session (the review step's fixer role). Steps outside the review loop
@@ -191,6 +192,7 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		CWD:        sctx.WorkDir,
 		JSONSchema: commitSummarySchema,
 		OnChunk:    sctx.LogChunk,
+		Model:      opts.Model,
 		Purpose:    purpose,
 		Workload:   opts.Workload,
 	}
