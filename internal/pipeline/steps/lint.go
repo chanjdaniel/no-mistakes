@@ -18,6 +18,7 @@ func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 	lintCmd := sctx.Config.Commands.Lint
+	model := lookupAgentModel(sctx.Config, string(types.StepLint))
 
 	if lintCmd == "" {
 		// The combined document+lint housekeeping pass already performed the
@@ -66,6 +67,7 @@ Previous lint findings to address:
 ` + sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
 		}
 		result, err := sctx.Agent.Run(ctx, agent.RunOpts{
+			Model:      model,
 			Prompt:     prompt,
 			CWD:        sctx.WorkDir,
 			JSONSchema: findingsSchema,
@@ -137,6 +139,7 @@ Previous lint findings to address:
 			Prompt:          fixPrompt,
 			ErrorPrefix:     "agent fix lint",
 			FallbackSummary: "fix lint issues",
+			Model:           model,
 		})
 		if err != nil {
 			return nil, err

@@ -10,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestLintStep_FixMode_CommitsChanges(t *testing.T) {
@@ -163,5 +164,67 @@ func TestLintStep_NoConfiguredLint_UnresolvedFindingsNeedApprovalWithoutAutoFixL
 	}
 	if !strings.Contains(ag.calls[0].Prompt, "only unresolved") {
 		t.Error("expected no-config lint prompt to report only unresolved issues")
+	}
+}
+
+func TestLintStep_AgentModelLookup_NoConfiguredLint(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	ag := &mockAgent{
+		name: "opencode",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"format code"}`)}, nil
+		},
+	}
+
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Agent = types.AgentOpenCode
+	sctx.Config.AgentModel = map[string]map[string]string{
+		"opencode": {"lint": "custom-lint-model"},
+	}
+
+	step := &LintStep{}
+	_, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("expected 1 agent call, got %d", len(ag.calls))
+	}
+	if ag.calls[0].Model != "custom-lint-model" {
+		t.Errorf("expected agent model 'custom-lint-model', got %q", ag.calls[0].Model)
+	}
+}
+
+func TestLintStep_AgentModelLookup_FixMode(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{
+		name: "opencode",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"summary":"fix lint issues"}`)}, nil
+		},
+	}
+
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Lint: "exit 0"})
+	sctx.Fixing = true
+	sctx.Config.Agent = types.AgentOpenCode
+	sctx.Config.AgentModel = map[string]map[string]string{
+		"opencode": {"lint": "fix-mode-lint-model"},
+	}
+
+	step := &LintStep{}
+	_, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("expected 1 agent call (fix), got %d", len(ag.calls))
+	}
+	if ag.calls[0].Model != "fix-mode-lint-model" {
+		t.Errorf("expected fix agent model 'fix-mode-lint-model', got %q", ag.calls[0].Model)
 	}
 }

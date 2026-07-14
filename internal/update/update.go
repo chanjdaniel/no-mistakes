@@ -62,6 +62,7 @@ type updater struct {
 	includePrereleases bool
 	assumeYes          bool
 	force              bool
+	forkBuild          bool
 }
 
 type RunOptions struct {
@@ -140,6 +141,7 @@ func defaultUpdater(stdout, stderr io.Writer) (*updater, error) {
 		resetDaemon: func() error {
 			return defaultResetDaemon(p)
 		},
+		forkBuild: buildinfo.ForkBuild == "true",
 	}, nil
 }
 
@@ -155,7 +157,7 @@ func (u *updater) refreshCache(ctx context.Context) error {
 }
 
 func (u *updater) maybeNotifyAndCheck(args []string) {
-	if u.disableBackground || isDevVersion(u.currentVersion) || os.Getenv(noUpdateCheckEnv) == "1" {
+	if u.disableBackground || u.forkBuild || isDevVersion(u.currentVersion) || os.Getenv(noUpdateCheckEnv) == "1" {
 		return
 	}
 	// Informational commands must be side-effect-free probes: `update` and the
@@ -178,7 +180,7 @@ func (u *updater) maybeNotifyAndCheck(args []string) {
 }
 
 func (u *updater) cachedLatestVersion() string {
-	if u == nil || u.disableBackground || isDevVersion(u.currentVersion) || os.Getenv(noUpdateCheckEnv) == "1" {
+	if u == nil || u.disableBackground || u.forkBuild || isDevVersion(u.currentVersion) || os.Getenv(noUpdateCheckEnv) == "1" {
 		return ""
 	}
 	cache := readCache(u.cachePath)
@@ -193,6 +195,10 @@ func (u *updater) cachedLatestVersion() string {
 }
 
 func (u *updater) run(ctx context.Context) error {
+	if u.forkBuild {
+		fmt.Fprintf(u.stdoutWriter(), "self-update is disabled for fork builds.\nThis binary was built from a fork, not from the upstream %s repository.\nUpdating would replace fork patches with an upstream release.\n", repoName)
+		return nil
+	}
 	if isDevVersion(u.currentVersion) {
 		fmt.Fprintf(u.stdoutWriter(), "self-update unavailable for development builds (%s)\n", u.currentVersion)
 		return nil

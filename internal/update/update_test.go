@@ -1154,3 +1154,85 @@ func TestUpdaterCachedLatestVersion(t *testing.T) {
 		t.Fatalf("cachedLatestVersion() = %q, want empty when already current", got)
 	}
 }
+
+func TestUpdaterMaybeNotifyAndCheck_ForkBuildNoNag(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "update-check.json")
+	if err := writeCache(cachePath, &checkCache{
+		CheckedAt:     time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC),
+		LatestVersion: "v1.2.3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stderr := new(bytes.Buffer)
+	spawned := false
+	u := &updater{
+		appName:        "no-mistakes",
+		currentVersion: "v1.2.2",
+		cachePath:      cachePath,
+		stderr:         stderr,
+		now:            func() time.Time { return time.Date(2026, 4, 9, 13, 0, 0, 0, time.UTC) },
+		spawnBackground: func(currentVersion string) error {
+			spawned = true
+			return nil
+		},
+		forkBuild: true,
+	}
+
+	u.maybeNotifyAndCheck([]string{"status"})
+
+	if stderr.Len() != 0 {
+		t.Fatalf("expected fork build to suppress nag, got %q", stderr.String())
+	}
+	if spawned {
+		t.Fatal("expected fork build to suppress background refresh")
+	}
+}
+
+func TestUpdaterRun_ForkBuildRefuses(t *testing.T) {
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	u := &updater{
+		appName:        "no-mistakes",
+		repo:           repoName,
+		currentVersion: "v1.2.2",
+		stdout:         stdout,
+		stderr:         stderr,
+		forkBuild:      true,
+	}
+
+	err := u.run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := stdout.String()
+	if !strings.Contains(got, "self-update is disabled for fork builds") {
+		t.Fatalf("expected fork build refusal, got %q", got)
+	}
+	if !strings.Contains(got, repoName) {
+		t.Fatalf("expected message to mention %s, got %q", repoName, got)
+	}
+}
+
+func TestUpdaterCachedLatestVersion_ForkBuildReturnsEmpty(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "update-check.json")
+	if err := writeCache(cachePath, &checkCache{
+		CheckedAt:     time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC),
+		LatestVersion: "v1.2.3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	u := &updater{
+		appName:        "no-mistakes",
+		currentVersion: "v1.2.2",
+		cachePath:      cachePath,
+		now:            func() time.Time { return time.Date(2026, 4, 9, 13, 0, 0, 0, time.UTC) },
+		forkBuild:      true,
+	}
+
+	if got := u.cachedLatestVersion(); got != "" {
+		t.Fatalf("cachedLatestVersion() = %q, want empty for fork build", got)
+	}
+}
