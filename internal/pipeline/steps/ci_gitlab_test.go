@@ -18,8 +18,12 @@ func TestCIStep_GitLabPassesWhenJobsPass(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
-	checksJSON := `[{"id":1,"name":"build","status":"success"},{"id":2,"name":"test","status":"success"}]`
-	env := fakeCIGlab(t, "opened", checksJSON)
+	// Two identical passing polls so stability check passes.
+	sequence := []string{
+		`[{"id":1,"name":"build","status":"success"},{"id":2,"name":"test","status":"success"}]`,
+		`[{"id":1,"name":"build","status":"success"},{"id":2,"name":"test","status":"success"}]`,
+	}
+	env := fakeCIGlabSequence(t, "opened", sequence)
 
 	prURL := "https://gitlab.com/test/repo/-/merge_requests/42"
 	ag := &mockAgent{name: "test"}
@@ -36,10 +40,15 @@ func TestCIStep_GitLabPassesWhenJobsPass(t *testing.T) {
 	defer cancel()
 	sctx.Ctx = ctx
 
+	pollCount := 0
 	step := &CIStep{
 		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
-			cancel()
-			return ctx.Err()
+			pollCount++
+			if pollCount >= 2 {
+				cancel()
+				return ctx.Err()
+			}
+			return nil
 		},
 	}
 	_, err := step.Execute(sctx)
@@ -242,8 +251,11 @@ func TestCIStep_GitLabPendingChecksKeepMonitoringWhenDone(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
+	// Poll 1: build running. Poll 2: build success (first clean poll).
+	// Poll 3: build success again (stable → declares pass).
 	sequence := []string{
 		`[{"id":1,"name":"build","status":"running"}]`,
+		`[{"id":1,"name":"build","status":"success"}]`,
 		`[{"id":1,"name":"build","status":"success"}]`,
 	}
 	env := fakeCIGlabSequence(t, "opened", sequence)
@@ -270,16 +282,19 @@ func TestCIStep_GitLabPendingChecksKeepMonitoringWhenDone(t *testing.T) {
 			if pollCount == 1 {
 				return nil
 			}
-			cancel()
-			return ctx.Err()
+			if pollCount >= 3 {
+				cancel()
+				return ctx.Err()
+			}
+			return nil
 		},
 	}
 	_, err := step.Execute(sctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected passing GitLab CI to keep monitoring while MR is open, got %v", err)
 	}
-	if pollCount != 2 {
-		t.Fatalf("expected one pending wait plus one healthy monitoring wait, got %d", pollCount)
+	if pollCount != 3 {
+		t.Fatalf("expected one pending wait plus two healthy monitoring waits, got %d", pollCount)
 	}
 	found := false
 	for _, line := range logs {

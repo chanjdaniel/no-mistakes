@@ -39,6 +39,12 @@ type CIStep struct {
 	pollIntervalOverride time.Duration        // if set, overrides computed poll interval (for testing)
 	waitForNextPoll      func(context.Context, time.Duration) error
 	now                  func() time.Time
+	// prevCheckCount tracks the number of checks from the previous clean
+	// (non-pending, no failures) poll. -1 means unset / not yet observed a
+	// clean poll. A stable check count across two consecutive clean polls is
+	// required before declaring "all CI checks passed", which prevents a
+	// premature pass on a partially registered check set.
+	prevCheckCount int
 	// baseBranchTip resolves the current tip SHA of the upstream default
 	// branch. The bool is false when the SHA is a fallback/unknown value and
 	// must not re-arm the timeout. Overridable for testing; defaults to
@@ -122,6 +128,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			return resolveDefaultBranchTip(ctx, sctx.WorkDir, sctx.Repo.UpstreamURL, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 		}
 	}
+	s.prevCheckCount = -1 // reset per invocation (struct may be reused across runs)
+
 	started := now()
 	// timeoutAnchor is the point the idle timeout is measured from. It re-arms
 	// to now() whenever the base branch advances, while started stays fixed so
@@ -221,6 +229,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		checks, err := host.GetChecks(ctx, pr)
 		if err != nil {
 			lastMonitorLog = ""
+			s.prevCheckCount = -1
 			sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
 		} else {
 			pending := hasPendingChecks(checks)
@@ -242,6 +251,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 
 			if hasIssues && pending {
 				lastMonitorLog = ""
+				s.prevCheckCount = -1
 				if pendingCheckMatchesLastFixed(checks, s.lastFixedChecks) {
 					s.lastFixedChecks = ""
 					s.lastFixedCompletedAt = nil
@@ -249,6 +259,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				sctx.Log("issues detected but checks still pending, waiting for all checks to complete...")
 			} else if hasIssues {
 				lastMonitorLog = ""
+				s.prevCheckCount = -1
 				// All checks done, issues present - fix or report
 				fixKey := encodeLastFixedChecks(failing, mergeConflict)
 				fixCompletedAt := failingCheckCompletionTimes(checks)
@@ -306,18 +317,35 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				switch {
 				case !prStateKnown || !mergeabilityKnown:
 					lastMonitorLog = ""
+					s.prevCheckCount = -1
 				case pending:
 					// Checks are (re-)running with no failures yet. Surface this
 					// so a PR that passed checks and starts re-running clears the
 					// previous passed-checks signal instead of looking stale.
+					s.prevCheckCount = -1
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
 				case len(checks) == 0 && elapsed < s.gracePeriod():
 					// CI checks may not be registered yet, keep polling.
 					lastMonitorLog = ""
 					sctx.Log("no CI checks reported yet, waiting for checks to register...")
 				case len(checks) == 0:
+					s.prevCheckCount = -1
 					lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
+				case s.prevCheckCount >= 0 && len(checks) != s.prevCheckCount:
+					// Check set size changed since last clean poll - still
+					// growing. Don't declare pass; record the new count and
+					// keep polling.
+					lastMonitorLog = ""
+					sctx.Log(fmt.Sprintf("CI check set still growing (%d checks, was %d), waiting for stable registration...", len(checks), s.prevCheckCount))
+					s.prevCheckCount = len(checks)
+				case s.prevCheckCount < 0:
+					// First clean poll with a non-empty check set. Record the
+					// count but don't declare pass until the set is stable
+					// across two consecutive polls.
+					s.prevCheckCount = len(checks)
+					lastMonitorLog = ""
 				default:
+					// Stable check set across consecutive polls, all passing.
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
 				}
 			}
