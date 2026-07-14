@@ -32,6 +32,8 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 
+	model := lookupAgentModel(sctx.Config, string(types.StepTest))
+
 	// In fix mode, ask agent to fix test failures first
 	var newTestsFromFix []string
 	var fixSummary string
@@ -71,6 +73,7 @@ Previous test findings to address:
 			Prompt:          fixPrompt,
 			ErrorPrefix:     "agent fix tests",
 			FallbackSummary: "fix test failures",
+			Model:           model,
 			AfterAgentRun: func(*agent.Result) error {
 				newTestsFromFix = detectNewTestFiles(ctx, sctx.WorkDir)
 				return nil
@@ -140,6 +143,7 @@ Previous test findings to address:
 			configuredTestCommand = fmt.Sprintf("\nConfigured test command already ran successfully as baseline: `%s`\n", testCmd)
 		}
 		result, err := sctx.Agent.Run(ctx, agent.RunOpts{
+			Model: model,
 			Prompt: fmt.Sprintf(
 				`You are validating a code change by testing it. Examine the repository and run the appropriate tests yourself.
 

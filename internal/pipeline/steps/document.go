@@ -120,6 +120,8 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		sctx.Log("updating documentation...")
 	}
 
+	model := lookupAgentModel(sctx.Config, string(types.StepDocument))
+
 	prompt := s.buildPrompt(sctx, baseSHA, ignorePatterns, combinedLint)
 	schema := findingsSchema
 	purpose := "document"
@@ -133,6 +135,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		CWD:        sctx.WorkDir,
 		JSONSchema: schema,
 		OnChunk:    sctx.LogChunk,
+		Model:      model,
 		Purpose:    purpose,
 	})
 	if err != nil {

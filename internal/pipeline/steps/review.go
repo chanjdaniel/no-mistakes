@@ -30,6 +30,8 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		reviewScope = fmt.Sprintf("current worktree and HEAD changes relative to base commit %s (starting head %s)", baseSHA, sctx.Run.HeadSHA)
 	}
 
+	model := lookupAgentModel(sctx.Config, string(types.StepReview))
+
 	// Bounded workload size (changed files + net lines) for local telemetry, so
 	// review/fix efficiency can be normalized without external git archaeology.
 	// Best-effort: a diff-stat failure leaves the workload unknown.
@@ -100,6 +102,7 @@ Previous review findings to address:
 			Prompt:                  fixPrompt,
 			ErrorPrefix:             "agent fix",
 			FallbackSummary:         "address review findings",
+			Model:                   model,
 			SessionRole:             pipeline.SessionRoleFixer,
 			Purpose:                 "review-fix",
 			Workload:                workload,
@@ -226,6 +229,7 @@ Risk assessment (after listing all findings):
 		CWD:        sctx.WorkDir,
 		JSONSchema: reviewFindingsSchema,
 		OnChunk:    sctx.LogChunk,
+		Model:      model,
 		Purpose:    "review",
 		Workload:   workload,
 	})

@@ -3,6 +3,7 @@ package steps
 import (
 	"encoding/json"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -120,6 +121,20 @@ var reviewFindingsSchema = json.RawMessage(`{
 	},
 	"required": ["findings", "risk_level", "risk_rationale"]
 }`)
+
+// lookupAgentModel returns the per-step model override for the configured
+// agent, or empty string when none is set.
+func lookupAgentModel(cfg *config.Config, stepName string) string {
+	if cfg.AgentModel == nil {
+		return ""
+	}
+	agentName := string(cfg.Agent)
+	steps, ok := cfg.AgentModel[agentName]
+	if !ok {
+		return ""
+	}
+	return steps[stepName]
+}
 
 // AllSteps returns the fixed pipeline step sequence.
 // When NM_DEMO=1, it returns mock steps for demo recordings.

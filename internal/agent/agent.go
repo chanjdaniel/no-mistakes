@@ -39,6 +39,9 @@ type RunOpts struct {
 	// review-fix, test-evidence, ...). Instrumentation only; adapters
 	// ignore it.
 	Purpose string
+	// Model is an optional per-step model override. The opencode adapter
+	// passes it as info.model; other adapters ignore it.
+	Model string
 	// SessionFallbackReason is the low-cardinality reason a failed resume forced
 	// this fresh-session retry (see db.FallbackReason*). Set only when
 	// SessionFallback is true. Instrumentation only; adapters ignore it.
