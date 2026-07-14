@@ -333,8 +333,11 @@ func TestCIStep_AllChecksPassingKeepsMonitoringOpenPR(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
+	// Poll 1: build pending. Poll 2: both pass (first clean poll, records count).
+	// Poll 3: both pass again (stable → declares pass).
 	checksSequence := []string{
 		`[{"name":"build","state":"PENDING","bucket":"pending"}]`,
+		`[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"test","state":"SUCCESS","bucket":"pass"}]`,
 		`[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"test","state":"SUCCESS","bucket":"pass"}]`,
 	}
 	env := fakeCIGHSequence(t, "OPEN", checksSequence)
@@ -357,19 +360,19 @@ func TestCIStep_AllChecksPassingKeepsMonitoringOpenPR(t *testing.T) {
 	step := &CIStep{
 		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
 			pollCount++
-			if pollCount == 1 {
-				return nil
+			if pollCount >= 3 {
+				cancel()
+				return ctx.Err()
 			}
-			cancel()
-			return ctx.Err()
+			return nil
 		},
 	}
 	_, err := step.Execute(sctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected open PR monitoring to continue after passing checks, got %v", err)
 	}
-	if pollCount != 2 {
-		t.Fatalf("expected one pending wait plus one healthy monitoring wait, got %d", pollCount)
+	if pollCount != 3 {
+		t.Fatalf("expected one pending wait plus two healthy monitoring waits, got %d", pollCount)
 	}
 
 	found := false
@@ -388,9 +391,12 @@ func TestCIStep_CIWarningAllowsChecksPassedToBeReannounced(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
+	// Each pass block needs two consecutive clean polls to confirm stability.
 	checksSequence := []string{
 		`[{"name":"build","state":"SUCCESS","bucket":"pass"}]`,
+		`[{"name":"build","state":"SUCCESS","bucket":"pass"}]`,
 		`not-json`,
+		`[{"name":"build","state":"SUCCESS","bucket":"pass"}]`,
 		`[{"name":"build","state":"SUCCESS","bucket":"pass"}]`,
 	}
 	env := fakeCIGHSequence(t, "OPEN", checksSequence)
@@ -400,7 +406,7 @@ func TestCIStep_CIWarningAllowsChecksPassedToBeReannounced(t *testing.T) {
 	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.Run.PRURL = &prURL
-	sctx.Config.CITimeout = 10 * time.Second
+	sctx.Config.CITimeout = 60 * time.Second
 
 	var logs []string
 	sctx.Log = func(s string) { logs = append(logs, s) }
@@ -411,9 +417,10 @@ func TestCIStep_CIWarningAllowsChecksPassedToBeReannounced(t *testing.T) {
 
 	waits := 0
 	step := &CIStep{
+		pollIntervalOverride: time.Millisecond,
 		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
 			waits++
-			if waits == 3 {
+			if waits == 5 {
 				cancel()
 				return ctx.Err()
 			}
@@ -440,8 +447,12 @@ func TestCIStep_OpenPRKeepsMonitoringAfterChecksPass(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
-	checksJSON := `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`
-	env := fakeCIGH(t, "OPEN", checksJSON)
+	// Two identical passing polls so stability check passes.
+	checksSequence := []string{
+		`[{"name":"build","state":"SUCCESS","bucket":"pass"}]`,
+		`[{"name":"build","state":"SUCCESS","bucket":"pass"}]`,
+	}
+	env := fakeCIGHSequence(t, "OPEN", checksSequence)
 
 	prURL := "https://github.com/test/repo/pull/42"
 	ag := &mockAgent{name: "test"}
@@ -458,16 +469,19 @@ func TestCIStep_OpenPRKeepsMonitoringAfterChecksPass(t *testing.T) {
 	step := &CIStep{
 		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
 			pollCount++
-			cancel()
-			return ctx.Err()
+			if pollCount >= 2 {
+				cancel()
+				return ctx.Err()
+			}
+			return nil
 		},
 	}
 	_, err := step.Execute(sctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected open PR monitoring to continue after passing checks, got %v", err)
 	}
-	if pollCount != 1 {
-		t.Fatalf("poll count = %d, want 1", pollCount)
+	if pollCount != 2 {
+		t.Fatalf("poll count = %d, want 2", pollCount)
 	}
 }
 
@@ -592,8 +606,12 @@ func TestCIStep_NonEmptyPassingChecksSkipGracePeriodAndContinueMonitoring(t *tes
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
-	checksJSON := `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`
-	env := fakeCIGH(t, "OPEN", checksJSON)
+	// Two identical passing polls so stability check passes.
+	checksSequence := []string{
+		`[{"name":"build","state":"SUCCESS","bucket":"pass"}]`,
+		`[{"name":"build","state":"SUCCESS","bucket":"pass"}]`,
+	}
+	env := fakeCIGHSequence(t, "OPEN", checksSequence)
 
 	prURL := "https://github.com/test/repo/pull/42"
 	ag := &mockAgent{name: "test"}
@@ -614,16 +632,19 @@ func TestCIStep_NonEmptyPassingChecksSkipGracePeriodAndContinueMonitoring(t *tes
 		checksGracePeriod: 10 * time.Second,
 		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
 			pollCount++
-			cancel()
-			return ctx.Err()
+			if pollCount >= 2 {
+				cancel()
+				return ctx.Err()
+			}
+			return nil
 		},
 	}
 	_, err := step.Execute(sctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected open PR monitoring to continue after passing checks, got %v", err)
 	}
-	if pollCount != 1 {
-		t.Fatalf("expected one healthy monitoring wait, got %d", pollCount)
+	if pollCount != 2 {
+		t.Fatalf("expected two healthy monitoring waits, got %d", pollCount)
 	}
 	found := false
 	for _, l := range logs {
@@ -990,5 +1011,69 @@ func TestCIStep_UnlimitedTimeoutNeverExpires(t *testing.T) {
 	}
 	if !noTimeoutLog {
 		t.Fatalf("expected the no-timeout monitoring log, got: %v", logs)
+	}
+}
+
+// TestCIStep_DoesNotDeclarePassOnPartiallyRegisteredCheckSet verifies the
+// monitor does NOT declare "all CI checks passed" when the check set is still
+// growing (checks are registered progressively by GitHub). A change in check
+// count between consecutive polls resets the stability tracking, so a pass is
+// only declared when the count stays the same across two consecutive clean
+// polls. This prevents the gate from reporting green before all checks (e.g.
+// e2e) have even been created.
+func TestCIStep_DoesNotDeclarePassOnPartiallyRegisteredCheckSet(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	// Poll 1: 5 checks all passing (partially registered set).
+	// Poll 2: e2e check finally appears, still running.
+	// Poll 3: all 6 checks pass (first clean poll with the full set).
+	// Poll 4: all 6 still pass (stable --- this is when we finally declare pass).
+	checksSequence := []string{
+		`[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"lint","state":"SUCCESS","bucket":"pass"},{"name":"test","state":"SUCCESS","bucket":"pass"},{"name":"security","state":"SUCCESS","bucket":"pass"},{"name":"typecheck","state":"SUCCESS","bucket":"pass"}]`,
+		`[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"lint","state":"SUCCESS","bucket":"pass"},{"name":"test","state":"SUCCESS","bucket":"pass"},{"name":"security","state":"SUCCESS","bucket":"pass"},{"name":"typecheck","state":"SUCCESS","bucket":"pass"},{"name":"e2e","state":"PENDING","bucket":"pending"}]`,
+		`[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"lint","state":"SUCCESS","bucket":"pass"},{"name":"test","state":"SUCCESS","bucket":"pass"},{"name":"security","state":"SUCCESS","bucket":"pass"},{"name":"typecheck","state":"SUCCESS","bucket":"pass"},{"name":"e2e","state":"SUCCESS","bucket":"pass"}]`,
+	}
+	env := fakeCIGHSequence(t, "OPEN", checksSequence)
+
+	prURL := "https://github.com/test/repo/pull/42"
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = 10 * time.Second
+
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+
+	pollCount := 0
+	step := &CIStep{
+		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
+			pollCount++
+			if pollCount >= 4 {
+				cancel()
+				return ctx.Err()
+			}
+			return nil
+		},
+	}
+	_, err := step.Execute(sctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected monitoring to continue, got %v", err)
+	}
+
+	// Count how many times "all CI checks passed" was logged.
+	passedCount := 0
+	for _, l := range logs {
+		if strings.Contains(l, "all CI checks passed - still monitoring until merged or closed") {
+			passedCount++
+		}
+	}
+	if passedCount != 1 {
+		t.Fatalf("expected exactly 1 'all CI checks passed' log (after stable second poll), got %d: %v", passedCount, logs)
 	}
 }

@@ -36,10 +36,16 @@ func TestCIStep_BitbucketPassesWhenStatusesPass(t *testing.T) {
 	defer cancel()
 	sctx.Ctx = ctx
 
+	// Two polls needed: first records the count, second confirms stability.
+	pollCount := 0
 	step := &CIStep{
 		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
-			cancel()
-			return ctx.Err()
+			pollCount++
+			if pollCount >= 2 {
+				cancel()
+				return ctx.Err()
+			}
+			return nil
 		},
 	}
 	_, err := step.Execute(sctx)
