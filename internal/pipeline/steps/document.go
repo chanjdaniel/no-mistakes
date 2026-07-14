@@ -121,6 +121,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	}
 
 	model := lookupAgentModel(sctx.Config, string(types.StepDocument))
+	logStepModel(sctx, types.StepDocument, model)
 
 	prompt := s.buildPrompt(sctx, baseSHA, ignorePatterns, combinedLint)
 	schema := findingsSchema

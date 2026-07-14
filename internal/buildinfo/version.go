@@ -9,6 +9,7 @@ import "runtime/debug"
 //	          -X github.com/kunchenguid/no-mistakes/internal/buildinfo.Date=2024-01-01
 //	          -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryHost=https://a.example.com
 //	          -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryWebsiteID=abc123"
+//
 // ForkBuild is "true" when this binary is a fork build rather than an
 // upstream release. It defaults to "true" in this source tree so that a
 // plain `go build` is protected; set to "false" via ldflags for an

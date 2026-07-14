@@ -228,3 +228,120 @@ func TestLintStep_AgentModelLookup_FixMode(t *testing.T) {
 		t.Errorf("expected fix agent model 'fix-mode-lint-model', got %q", ag.calls[0].Model)
 	}
 }
+
+func TestLintStep_LogModel_ExplicitOverride(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	var logs []string
+	ag := &mockAgent{
+		name: "opencode",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"ok"}`)}, nil
+		},
+	}
+
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Log = func(s string) { logs = append(logs, s) }
+	sctx.LogChunk = func(s string) {}
+	sctx.Config.Agent = types.AgentOpenCode
+	sctx.Config.AgentModel = map[string]map[string]string{
+		"opencode": {"lint": "deepseek/deepseek-v4-flash"},
+	}
+
+	step := &LintStep{}
+	_, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, line := range logs {
+		if strings.Contains(line, "using agent_model override for step lint") &&
+			strings.Contains(line, "deepseek/deepseek-v4-flash") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected log with explicit override, got: %v", logs)
+	}
+}
+
+func TestLintStep_LogModel_NoOverride(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	var logs []string
+	ag := &mockAgent{
+		name: "opencode",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"ok"}`)}, nil
+		},
+	}
+
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Log = func(s string) { logs = append(logs, s) }
+	sctx.LogChunk = func(s string) {}
+	sctx.Config.Agent = types.AgentOpenCode
+
+	step := &LintStep{}
+	_, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, line := range logs {
+		if strings.Contains(line, "no agent_model override configured for step lint") &&
+			strings.Contains(line, "running on agent default") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected log with no-override message, got: %v", logs)
+	}
+}
+
+func TestLintStep_LogModel_OverrideIgnoredByNonOpencodeAgent(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	var logs []string
+	ag := &mockAgent{
+		name: "claude",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"ok"}`)}, nil
+		},
+	}
+
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Log = func(s string) { logs = append(logs, s) }
+	sctx.LogChunk = func(s string) {}
+	sctx.Config.Agent = types.AgentClaude
+	sctx.Config.AgentModel = map[string]map[string]string{
+		"claude": {"lint": "anthropic/claude-sonnet-4"},
+	}
+
+	step := &LintStep{}
+	_, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, line := range logs {
+		if strings.Contains(line, "ignores per-step model overrides") &&
+			strings.Contains(line, "running on agent default") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected warning log about ignored override, got: %v", logs)
+	}
+}

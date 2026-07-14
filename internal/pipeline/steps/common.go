@@ -2,6 +2,7 @@ package steps
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -134,6 +135,29 @@ func lookupAgentModel(cfg *config.Config, stepName string) string {
 		return ""
 	}
 	return steps[stepName]
+}
+
+// logStepModel logs the resolved model at the start of an agent-backed step.
+// It distinguishes three cases:
+//  1. Explicit per-step override configured and in use.
+//  2. No override configured; step runs on the agent's default model.
+//  3. Override configured but the agent ignores per-step model overrides
+//     (non-opencode adapters); logged as a warning.
+func logStepModel(sctx *pipeline.StepContext, stepName types.StepName, model string) {
+	if model != "" {
+		// The opencode adapter is the only one that passes Model to the
+		// server today. Other adapters silently ignore it, which made
+		// the bug from chanjdaniel/no-mistakes#2 survive undetected.
+		if sctx.Config.Agent != types.AgentOpenCode {
+			sctx.Log(fmt.Sprintf(
+				"agent_model override %q configured for step %s but agent %q ignores per-step model overrides; running on agent default",
+				model, stepName, sctx.Config.Agent))
+		} else {
+			sctx.Log(fmt.Sprintf("using agent_model override for step %s: %s", stepName, model))
+		}
+	} else {
+		sctx.Log(fmt.Sprintf("no agent_model override configured for step %s; running on agent default", stepName))
+	}
 }
 
 // AllSteps returns the fixed pipeline step sequence.

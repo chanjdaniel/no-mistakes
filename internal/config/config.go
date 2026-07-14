@@ -76,14 +76,14 @@ type globalConfigRaw struct {
 	AgentArgsOverride    map[string][]string          `yaml:"agent_args_override"`
 	AgentModel           map[string]map[string]string `yaml:"agent_model"`
 	CITimeout            string                       `yaml:"ci_timeout"`
-	DaemonConnectTimeout string              `yaml:"daemon_connect_timeout"`
-	BabysitTimeout       string              `yaml:"babysit_timeout"`
-	StepQuietWarning     string              `yaml:"step_quiet_warning"`
-	LogLevel             string              `yaml:"log_level"`
-	SessionReuse         *bool               `yaml:"session_reuse"`
-	AutoFix              AutoFixRaw          `yaml:"auto_fix"`
-	Intent               IntentRaw           `yaml:"intent"`
-	Test                 TestRaw             `yaml:"test"`
+	DaemonConnectTimeout string                       `yaml:"daemon_connect_timeout"`
+	BabysitTimeout       string                       `yaml:"babysit_timeout"`
+	StepQuietWarning     string                       `yaml:"step_quiet_warning"`
+	LogLevel             string                       `yaml:"log_level"`
+	SessionReuse         *bool                        `yaml:"session_reuse"`
+	AutoFix              AutoFixRaw                   `yaml:"auto_fix"`
+	Intent               IntentRaw                    `yaml:"intent"`
+	Test                 TestRaw                      `yaml:"test"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -92,7 +92,7 @@ type RepoConfig struct {
 	Agents         []types.AgentName            `yaml:"-"`
 	AgentModel     map[string]map[string]string `yaml:"agent_model"`
 	Commands       Commands                     `yaml:"commands"`
-	IgnorePatterns []string          `yaml:"ignore_patterns"`
+	IgnorePatterns []string                     `yaml:"ignore_patterns"`
 	// AllowRepoCommands opts in to honoring the code-executing selection
 	// fields (commands.{test,lint,format} and agent) from a contributor's
 	// pushed branch instead of the trusted default-branch copy. It is read
@@ -132,16 +132,16 @@ type DocumentRaw struct {
 
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
-		Agent                  agentList                  `yaml:"agent"`
+		Agent                  agentList                    `yaml:"agent"`
 		AgentModel             map[string]map[string]string `yaml:"agent_model"`
-		Commands               Commands                   `yaml:"commands"`
-		IgnorePatterns         []string    `yaml:"ignore_patterns"`
-		AllowRepoCommands      bool        `yaml:"allow_repo_commands"`
-		AutoFix                AutoFixRaw  `yaml:"auto_fix"`
-		Intent                 IntentRaw   `yaml:"intent"`
-		Test                   TestRaw     `yaml:"test"`
-		Document               DocumentRaw `yaml:"document"`
-		DisableProjectSettings bool        `yaml:"disable_project_settings"`
+		Commands               Commands                     `yaml:"commands"`
+		IgnorePatterns         []string                     `yaml:"ignore_patterns"`
+		AllowRepoCommands      bool                         `yaml:"allow_repo_commands"`
+		AutoFix                AutoFixRaw                   `yaml:"auto_fix"`
+		Intent                 IntentRaw                    `yaml:"intent"`
+		Test                   TestRaw                      `yaml:"test"`
+		Document               DocumentRaw                  `yaml:"document"`
+		DisableProjectSettings bool                         `yaml:"disable_project_settings"`
 	}
 	var raw repoConfigRaw
 	if err := value.Decode(&raw); err != nil {
