@@ -31,6 +31,7 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	}
 
 	model := lookupAgentModel(sctx.Config, string(types.StepReview))
+	logStepModel(sctx, types.StepReview, model)
 
 	// Bounded workload size (changed files + net lines) for local telemetry, so
 	// review/fix efficiency can be normalized without external git archaeology.

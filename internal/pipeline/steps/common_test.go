@@ -997,3 +997,58 @@ func TestSanitizedPreviousFindingsForPrompt_PreservesSourceAndInstructions(t *te
 		t.Errorf("expected Source %q, got %q", types.FindingSourceUser, findings.Items[1].Source)
 	}
 }
+
+func TestLogStepModel_ExplicitOverride(t *testing.T) {
+	t.Parallel()
+	var logLines []string
+	sctx := &pipeline.StepContext{
+		Ctx:    context.Background(),
+		Config: &config.Config{Agent: types.AgentOpenCode},
+		Log:    func(s string) { logLines = append(logLines, s) },
+	}
+	logStepModel(sctx, types.StepReview, "anthropic/claude-sonnet-4")
+	if len(logLines) != 1 {
+		t.Fatalf("expected 1 log line, got %d: %v", len(logLines), logLines)
+	}
+	if want := "using agent_model override for step review: anthropic/claude-sonnet-4"; logLines[0] != want {
+		t.Errorf("log = %q, want %q", logLines[0], want)
+	}
+}
+
+func TestLogStepModel_NoOverride(t *testing.T) {
+	t.Parallel()
+	var logLines []string
+	sctx := &pipeline.StepContext{
+		Ctx:    context.Background(),
+		Config: &config.Config{Agent: types.AgentOpenCode},
+		Log:    func(s string) { logLines = append(logLines, s) },
+	}
+	logStepModel(sctx, types.StepTest, "")
+	if len(logLines) != 1 {
+		t.Fatalf("expected 1 log line, got %d: %v", len(logLines), logLines)
+	}
+	want := "no agent_model override configured for step test; running on agent default"
+	if logLines[0] != want {
+		t.Errorf("log = %q, want %q", logLines[0], want)
+	}
+}
+
+func TestLogStepModel_OverrideIgnoredByNonOpencodeAgent(t *testing.T) {
+	t.Parallel()
+	var logLines []string
+	sctx := &pipeline.StepContext{
+		Ctx:    context.Background(),
+		Config: &config.Config{Agent: types.AgentClaude},
+		Log:    func(s string) { logLines = append(logLines, s) },
+	}
+	logStepModel(sctx, types.StepDocument, "anthropic/claude-sonnet-4")
+	if len(logLines) != 1 {
+		t.Fatalf("expected 1 log line, got %d: %v", len(logLines), logLines)
+	}
+	if !strings.Contains(logLines[0], "ignores per-step model overrides") {
+		t.Errorf("expected warning about ignored override, got %q", logLines[0])
+	}
+	if !strings.Contains(logLines[0], "running on agent default") {
+		t.Errorf("expected 'running on agent default', got %q", logLines[0])
+	}
+}

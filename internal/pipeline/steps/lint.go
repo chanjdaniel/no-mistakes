@@ -19,6 +19,7 @@ func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 	lintCmd := sctx.Config.Commands.Lint
 	model := lookupAgentModel(sctx.Config, string(types.StepLint))
+	logStepModel(sctx, types.StepLint, model)
 
 	if lintCmd == "" {
 		// The combined document+lint housekeeping pass already performed the

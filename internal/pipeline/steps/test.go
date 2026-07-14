@@ -33,6 +33,7 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 
 	model := lookupAgentModel(sctx.Config, string(types.StepTest))
+	logStepModel(sctx, types.StepTest, model)
 
 	// In fix mode, ask agent to fix test failures first
 	var newTestsFromFix []string
