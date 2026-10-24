@@ -12,6 +12,10 @@ func opencodeTokensToUsage(t *opencodeTokens) TokenUsage {
 		OutputTokens: t.Output,
 		Reported:     true,
 	}
+	if t.Reasoning != nil {
+		u.ReasoningTokens = *t.Reasoning
+		u.ReasoningReported = true
+	}
 	if t.Cache != nil {
 		u.CacheReadTokens = t.Cache.Read
 		u.CacheCreationTokens = t.Cache.Write
@@ -31,6 +35,7 @@ func accumulateUsage(byMsg map[string]TokenUsage) TokenUsage {
 // parseOpencodeSSE processes the SSE stream from OpenCode's /global/event endpoint.
 func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 	var sawIdle bool
+	var streamErr error
 	err := parseSSE(r, func(ev sseEvent) bool {
 		if ev.Data == "" {
 			return true
@@ -53,6 +58,16 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 		}
 
 		switch payload.Type {
+		case "session.error":
+			if props != nil && isThinkingToolChoiceConflict(props.Error) {
+				streamErr = errOpencodeThinkingToolChoiceConflict
+				return false
+			}
+			if props != nil && isForcedToolChoiceUnsupported(props.Error) {
+				streamErr = errOpencodeForcedToolChoiceUnsupported
+				return false
+			}
+
 		case "message.part.delta":
 			if props != nil && props.Field == "text" && props.PartID != "" && props.Delta != "" {
 				if state.filteredPartIDs[props.PartID] {
@@ -94,8 +109,11 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 					}
 					state.emitTextPartChunk(part, p.ID)
 				}
+				if isOpencodeToolPart(p.Type) {
+					state.toolInvoked = true
+				}
 				if p.Type == "step-finish" {
-					state.hadToolActivity = true
+					state.pendingStepSeparator = true
 					if p.MessageID != "" && p.Tokens != nil {
 						state.usageByMsg[p.MessageID] = opencodeTokensToUsage(p.Tokens)
 						state.usage = accumulateUsage(state.usageByMsg)
@@ -118,6 +136,7 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 					}
 					state.assistantMsgIDs[props.Info.ID] = true
 					state.emitBufferedMessageParts(props.Info.ID)
+					state.noteServed(props.Info.opencodeServedModel)
 				}
 				if props.Info.Role == "assistant" && props.Info.Tokens != nil {
 					state.usageByMsg[props.Info.ID] = opencodeTokensToUsage(props.Info.Tokens)
@@ -136,6 +155,9 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 	if err != nil {
 		return err
 	}
+	if streamErr != nil {
+		return streamErr
+	}
 	if !sawIdle {
 		// Stream ended without session.idle — not an error if message response
 		// will provide the final result
@@ -143,14 +165,42 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 	return nil
 }
 
+// noteServed keeps an assistant message's model identity. A message without
+// one (opencode's first update of a message can precede it) changes nothing.
+func (s *opencodeStreamState) noteServed(served opencodeServedModel) {
+	if served.ModelID != "" {
+		s.served = served
+	}
+}
+
+// stamp records the served model on a result. A turn that reported neither
+// usage nor a model has nothing to record, so a nil result stays nil.
+func (s *opencodeStreamState) stamp(res *Result) *Result {
+	if s.served.ModelID == "" {
+		return res
+	}
+	if res == nil {
+		res = &Result{}
+	}
+	res.Model = s.served.ModelID
+	res.ModelProvider = s.served.ProviderID
+	return res
+}
+
+// partialResult is what a failed turn returns beside its error: the usage it
+// reported and the model it ran on.
+func (s *opencodeStreamState) partialResult() *Result {
+	return s.stamp(resultFromUsage(s.usage))
+}
+
 func (s *opencodeStreamState) emitSeparatorIfNeeded() {
-	if !s.hadToolActivity || s.onChunk == nil {
+	if !s.pendingStepSeparator || s.onChunk == nil {
 		return
 	}
 	if s.hasEmittedText {
 		s.onChunk("\n\n")
 	}
-	s.hadToolActivity = false
+	s.pendingStepSeparator = false
 }
 
 func (s *opencodeStreamState) emitTextPartChunk(part *opencodeTextPart, partID string) {

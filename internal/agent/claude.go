@@ -28,6 +28,7 @@ const claudeScannerMaxTokenSize = 256 * 1024 * 1024
 type claudeAgent struct {
 	bin       string
 	extraArgs []string
+	subprocessContext
 	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
 	// buildArgs suppresses claude's project-level settings/memory surface.
 	disableProjectSettings bool
@@ -69,16 +70,20 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	if opts.Session != nil {
 		resumeID = opts.Session.ID
 	}
-	args := a.buildArgs(opts.Prompt, opts.JSONSchema, resumeID)
+	args := a.buildArgs(opts.JSONSchema, resumeID)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
-	cmd.Stdin = nil
-	cmd.Env = gitSafeEnv(opts.CWD)
+	// Claude Code print mode documents text stdin as its non-interactive
+	// prompt transport. Giving os/exec an in-memory reader keeps user prompt
+	// bytes out of argv and lets Cmd own the bounded concurrent copy, including
+	// EOF, early-child-exit, cancellation, and WaitDelay cleanup paths.
+	cmd.Stdin = strings.NewReader(opts.Prompt)
+	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
 	shellenv.ConfigureShellCommand(cmd)
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup
-	started, err := startNativeAgentCommand(cmd)
+	started, err := startNativeAgentCommand(cmd, nativeAgentActivityObserver(opts, "claude"))
 	if err != nil {
 		return nil, fmt.Errorf("claude start: %w", err)
 	}
@@ -99,7 +104,7 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 		stderrWG.Wait()
 		retErr := fmt.Errorf("claude parse events: %w", err)
 		emitAgentExited(opts, "claude", pid, retErr)
-		return nil, retErr
+		return resultFromUsage(usage), retErr
 	}
 
 	waitErr := started.wait()
@@ -107,13 +112,13 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	if waitErr != nil {
 		retErr := fmt.Errorf("claude exited: %w: %s", waitErr, string(stderrBuf))
 		emitAgentExited(opts, "claude", pid, retErr)
-		return nil, retErr
+		return resultFromUsage(usage), retErr
 	}
 
 	if result == nil {
 		retErr := fmt.Errorf("claude returned no result event")
 		emitAgentExited(opts, "claude", pid, retErr)
-		return nil, retErr
+		return resultFromUsage(usage), retErr
 	}
 
 	res, err := finalizeClaudeResult(result, opts.JSONSchema, usage)
@@ -144,10 +149,10 @@ func (a *claudeAgent) Close() error { return nil }
 
 func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage TokenUsage) (*Result, error) {
 	if result.IsError || result.Subtype != "success" {
-		return nil, fmt.Errorf("claude error: subtype=%s", result.Subtype)
+		return resultFromUsage(usage), fmt.Errorf("claude error: subtype=%s", result.Subtype)
 	}
 	if len(schema) > 0 && result.StructuredOutput == nil {
-		return nil, errNoStructuredOutput
+		return resultFromUsage(usage), rejectStructuredOutput(errNoStructuredOutput)
 	}
 
 	return &Result{
@@ -166,11 +171,11 @@ func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage To
 // is not added. A non-empty resumeID continues that session via --resume
 // (never --fork-session: the session identity must stay stable so later
 // turns keep resuming the same conversation).
-func (a *claudeAgent) buildArgs(prompt string, schema json.RawMessage, resumeID string) []string {
-	args := make([]string, 0, len(a.extraArgs)+12)
+func (a *claudeAgent) buildArgs(schema json.RawMessage, resumeID string) []string {
+	args := make([]string, 0, len(a.extraArgs)+11)
 	args = append(args, a.extraArgs...)
 	args = append(args,
-		"-p", prompt,
+		"-p",
 		"--verbose",
 		"--output-format", "stream-json",
 	)

@@ -24,7 +24,6 @@ const (
 	defaultHostname = "cli"
 	defaultTitle    = "no-mistakes CLI"
 	defaultPath     = "/api/send"
-	defaultHost     = "https://a.kunchenguid.com"
 
 	umamiHostEnv      = "NO_MISTAKES_UMAMI_HOST"
 	umamiWebsiteIDEnv = "NO_MISTAKES_UMAMI_WEBSITE_ID"
@@ -377,11 +376,10 @@ func defaultHostValue() string {
 		host = strings.TrimSpace(values[umamiHostEnv])
 	}
 
+	// No fallback host: this fork sends telemetry only to a host that is
+	// configured explicitly.
 	if host == "" {
 		host = strings.TrimSpace(buildinfo.TelemetryHost)
-	}
-	if host == "" {
-		host = defaultHost
 	}
 
 	return host

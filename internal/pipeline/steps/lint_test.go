@@ -7,9 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -61,6 +64,10 @@ func TestLintStep_FixMode_CommitsChanges(t *testing.T) {
 	}
 	if !strings.Contains(ag.calls[0].Prompt, "smallest correct root-cause fix") {
 		t.Error("expected lint fix prompt to prefer root-cause fixes over bandaids")
+	}
+	if !strings.Contains(ag.calls[0].Prompt, "When a problem can be solved by removing a code path that is not strictly required to satisfy the intent") ||
+		!strings.Contains(ag.calls[0].Prompt, "fix it by removing that path, not by validating, hardening, or documenting it") {
+		t.Error("expected configured lint fix prompt to prefer removing unrequired paths")
 	}
 	if strings.Contains(ag.calls[0].Prompt, "Make the minimal change needed") {
 		t.Error("expected lint fix prompt not to prefer narrow minimal changes")
@@ -138,6 +145,103 @@ func TestLintStep_NoConfiguredLint_CommitsAgentFixesWithoutApproval(t *testing.T
 	}
 }
 
+// TestLintStep_NoConfiguredLint_FixRoundRunsAsLintFix pins the purpose of
+// the agent lint pass: a fix round is "lint-fix", like executeFixMode's, so
+// agent_model's lint-fix key routes it and stats tell it apart; any other
+// round is "lint".
+func TestLintStep_NoConfiguredLint_FixRoundRunsAsLintFix(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		fixing bool
+		want   string
+	}{{false, "lint"}, {true, "lint-fix"}} {
+		dir, baseSHA, headSHA := setupGitRepo(t)
+		gitCmd(t, dir, "checkout", "--detach", headSHA)
+		var purposes []string
+		ag := &mockAgent{
+			name: "test",
+			runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				purposes = append(purposes, opts.Purpose)
+				return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"lint clean"}`)}, nil
+			},
+		}
+		sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+		sctx.Fixing = tc.fixing
+		if _, err := (&LintStep{}).Execute(sctx); err != nil {
+			t.Fatal(err)
+		}
+		if len(purposes) != 1 || purposes[0] != tc.want {
+			t.Errorf("fixing=%t: agent purposes = %q, want [%q]", tc.fixing, purposes, tc.want)
+		}
+	}
+}
+
+func TestLintStep_MalformedStructuredOutputFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{not json`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	outcome, err := (&LintStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "lint analyzer") {
+		t.Fatalf("Execute() error = %v, want malformed lint analyzer output", err)
+	}
+	if outcome != nil {
+		t.Fatalf("Execute() outcome = %+v, want no outcome", outcome)
+	}
+}
+
+func TestLintStep_NoConfiguredLint_RejectsInvalidSummaryWithoutStaging(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		summary string
+	}{
+		{name: "oversized", summary: strings.Repeat("x", 4097)},
+		{name: "blank", summary: " \t\n "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+			output, err := json.Marshal(map[string]any{
+				"findings": []any{},
+				"summary":  tc.summary,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ag := &mockAgent{
+				name: "test",
+				runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+					if err := os.WriteFile(filepath.Join(dir, "lint-fix.txt"), []byte("fixed"), 0o644); err != nil {
+						return nil, err
+					}
+					return &agent.Result{Output: output}, nil
+				},
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+			if _, err := (&LintStep{}).Execute(sctx); err == nil {
+				t.Fatal("LintStep.Execute() accepted an invalid summary")
+			} else if !strings.Contains(err.Error(), "missing summary") && !strings.Contains(err.Error(), "rejected commit summary") {
+				t.Fatalf("LintStep.Execute() error = %v, want rejected summary", err)
+			}
+			if got := gitCmd(t, dir, "diff", "--cached", "--name-only"); got != "" {
+				t.Fatalf("staged files after summary error = %q, want none", got)
+			}
+			if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+				t.Fatalf("HEAD after summary error = %q, want %q", got, headSHA)
+			}
+		})
+	}
+}
+
 func TestLintStep_NoConfiguredLint_UnresolvedFindingsNeedApprovalWithoutAutoFixLoop(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -165,183 +269,70 @@ func TestLintStep_NoConfiguredLint_UnresolvedFindingsNeedApprovalWithoutAutoFixL
 	if !strings.Contains(ag.calls[0].Prompt, "only unresolved") {
 		t.Error("expected no-config lint prompt to report only unresolved issues")
 	}
+	if !strings.Contains(ag.calls[0].Prompt, "When a problem can be solved by removing a code path that is not strictly required to satisfy the intent") ||
+		!strings.Contains(ag.calls[0].Prompt, "fix it by removing that path, not by validating, hardening, or documenting it") {
+		t.Error("expected no-config lint fix prompt to prefer removing unrequired paths")
+	}
 }
 
-func TestLintStep_AgentModelLookup_NoConfiguredLint(t *testing.T) {
-	t.Parallel()
+func TestLintStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
-
 	ag := &mockAgent{
-		name: "opencode",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"format code"}`)}, nil
+		name: "hanging-lint-agent",
+		runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			<-ctx.Done()
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"fix lint"}`)}, nil
 		},
 	}
-
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Config.Agent = types.AgentOpenCode
-	sctx.Config.AgentModel = map[string]map[string]string{
-		"opencode": {"lint": "custom-lint-model"},
+	sctx.Config.AgentTimeout = 20 * time.Millisecond
+
+	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&LintStep{}}, nil)
+	if err := exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err == nil {
+		t.Fatal("expected hanging lint agent to fail the run")
 	}
 
-	step := &LintStep{}
-	_, err := step.Execute(sctx)
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("get run: %v", err)
 	}
-	if len(ag.calls) != 1 {
-		t.Fatalf("expected 1 agent call, got %d", len(ag.calls))
+	if run.Status != types.RunFailed {
+		t.Fatalf("run status = %s, want %s", run.Status, types.RunFailed)
 	}
-	if ag.calls[0].Model != "custom-lint-model" {
-		t.Errorf("expected agent model 'custom-lint-model', got %q", ag.calls[0].Model)
+	if run.Error == nil || !strings.Contains(*run.Error, "agent timed out after 20ms") {
+		var got string
+		if run.Error != nil {
+			got = *run.Error
+		}
+		t.Fatalf("run error = %q, want timeout diagnostic", got)
 	}
 }
 
-func TestLintStep_AgentModelLookup_FixMode(t *testing.T) {
+func TestLintStep_FixAgentSuccessfulReturnAfterTimeoutFailsWithoutCommit(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
-
 	ag := &mockAgent{
-		name: "opencode",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		name: "late-lint-fix-agent",
+		runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(dir, "lint-fix.txt"), []byte("fixed"), 0o644); err != nil {
+				return nil, err
+			}
+			<-ctx.Done()
 			return &agent.Result{Output: json.RawMessage(`{"summary":"fix lint issues"}`)}, nil
 		},
 	}
-
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Lint: "exit 0"})
 	sctx.Fixing = true
-	sctx.Config.Agent = types.AgentOpenCode
-	sctx.Config.AgentModel = map[string]map[string]string{
-		"opencode": {"lint": "fix-mode-lint-model"},
-	}
+	sctx.Config.AgentTimeout = 20 * time.Millisecond
 
-	step := &LintStep{}
-	_, err := step.Execute(sctx)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := (&LintStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), "timed out after 20ms") {
+		t.Fatalf("late successful return error = %v, want timeout", err)
 	}
-	if len(ag.calls) != 1 {
-		t.Fatalf("expected 1 agent call (fix), got %d", len(ag.calls))
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("HEAD = %s, want unchanged %s", got, headSHA)
 	}
-	if ag.calls[0].Model != "fix-mode-lint-model" {
-		t.Errorf("expected fix agent model 'fix-mode-lint-model', got %q", ag.calls[0].Model)
-	}
-}
-
-func TestLintStep_LogModel_ExplicitOverride(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	gitCmd(t, dir, "checkout", "--detach", headSHA)
-
-	var logs []string
-	ag := &mockAgent{
-		name: "opencode",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"ok"}`)}, nil
-		},
-	}
-
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Log = func(s string) { logs = append(logs, s) }
-	sctx.LogChunk = func(s string) {}
-	sctx.Config.Agent = types.AgentOpenCode
-	sctx.Config.AgentModel = map[string]map[string]string{
-		"opencode": {"lint": "deepseek/deepseek-v4-flash"},
-	}
-
-	step := &LintStep{}
-	_, err := step.Execute(sctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	found := false
-	for _, line := range logs {
-		if strings.Contains(line, "using agent_model override for step lint") &&
-			strings.Contains(line, "deepseek/deepseek-v4-flash") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected log with explicit override, got: %v", logs)
-	}
-}
-
-func TestLintStep_LogModel_NoOverride(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	gitCmd(t, dir, "checkout", "--detach", headSHA)
-
-	var logs []string
-	ag := &mockAgent{
-		name: "opencode",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"ok"}`)}, nil
-		},
-	}
-
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Log = func(s string) { logs = append(logs, s) }
-	sctx.LogChunk = func(s string) {}
-	sctx.Config.Agent = types.AgentOpenCode
-
-	step := &LintStep{}
-	_, err := step.Execute(sctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	found := false
-	for _, line := range logs {
-		if strings.Contains(line, "no agent_model override configured for step lint") &&
-			strings.Contains(line, "running on agent default") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected log with no-override message, got: %v", logs)
-	}
-}
-
-func TestLintStep_LogModel_OverrideIgnoredByNonOpencodeAgent(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	gitCmd(t, dir, "checkout", "--detach", headSHA)
-
-	var logs []string
-	ag := &mockAgent{
-		name: "claude",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"ok"}`)}, nil
-		},
-	}
-
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Log = func(s string) { logs = append(logs, s) }
-	sctx.LogChunk = func(s string) {}
-	sctx.Config.Agent = types.AgentClaude
-	sctx.Config.AgentModel = map[string]map[string]string{
-		"claude": {"lint": "anthropic/claude-sonnet-4"},
-	}
-
-	step := &LintStep{}
-	_, err := step.Execute(sctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	found := false
-	for _, line := range logs {
-		if strings.Contains(line, "ignores per-step model overrides") &&
-			strings.Contains(line, "running on agent default") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected warning log about ignored override, got: %v", logs)
+	if got := gitCmd(t, dir, "status", "--porcelain", "--", "lint-fix.txt"); got != "?? lint-fix.txt" {
+		t.Fatalf("lint-fix.txt status = %q, want uncommitted", got)
 	}
 }

@@ -54,7 +54,7 @@ func TestMakeBuildUsesEnvUmamiWebsiteIDWhenDotEnvMissing(t *testing.T) {
 	}
 }
 
-func TestMakeBuildEmbedsDefaultSelfHostedTelemetryConfig(t *testing.T) {
+func TestMakeBuildEmbedsNoTelemetryConfigByDefault(t *testing.T) {
 	skipMakeBuildTestsOnWindows(t)
 
 	makePath, err := exec.LookPath("make")
@@ -65,11 +65,49 @@ func TestMakeBuildEmbedsDefaultSelfHostedTelemetryConfig(t *testing.T) {
 	workDir := writeTestMakeWorkspace(t)
 	output := runMakeDryBuild(t, makePath, workDir, nil)
 
-	if !strings.Contains(output, "TelemetryHost=https://a.kunchenguid.com") {
-		t.Fatalf("make build output should embed default telemetry host, got:\n%s", output)
+	// The fork sends no telemetry: with no .env or shell override, the
+	// build embeds an empty host and website ID.
+	if !strings.Contains(output, "internal/buildinfo.TelemetryHost= ") {
+		t.Fatalf("make build output should embed an empty telemetry host, got:\n%s", output)
 	}
-	if !strings.Contains(output, "TelemetryWebsiteID=f959e889-92f5-4121-8a1f-571b10861198") {
-		t.Fatalf("make build output should embed default telemetry website id, got:\n%s", output)
+	if !strings.Contains(output, "internal/buildinfo.TelemetryWebsiteID= ") {
+		t.Fatalf("make build output should embed an empty telemetry website id, got:\n%s", output)
+	}
+}
+
+func TestMakeBuildBinaryHoldsNoAnalyticsHost(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath, err := exec.LookPath("make")
+	if err != nil {
+		t.Skip("make not available")
+	}
+
+	// Run the exact command `make build` would, with only its output path
+	// moved out of the repository.
+	command := runMakeDryBuild(t, makePath, writeTestMakeWorkspace(t), nil)
+	bin := filepath.Join(t.TempDir(), "no-mistakes")
+	const target = " -o bin/no-mistakes "
+	if !strings.Contains(command, target) {
+		t.Fatalf("make build output should build into bin/no-mistakes, got:\n%s", command)
+	}
+	command = strings.Replace(command, target, " -o '"+bin+"' ", 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	data, err := os.ReadFile(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, upstream := range []string{"a.kunchenguid.com", "f959e889-92f5-4121-8a1f-571b10861198"} {
+		if strings.Contains(string(data), upstream) {
+			t.Fatalf("built binary holds upstream analytics value %q", upstream)
+		}
 	}
 }
 

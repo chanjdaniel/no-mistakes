@@ -331,6 +331,11 @@ func (s *fakeOpencodeServer) handleMessage(w http.ResponseWriter, r *http.Reques
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"parts"`
+		Model *struct {
+			ProviderID string `json:"providerID"`
+			ModelID    string `json:"modelID"`
+		} `json:"model"`
+		Variant string `json:"variant"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -342,7 +347,13 @@ func (s *fakeOpencodeServer) handleMessage(w http.ResponseWriter, r *http.Reques
 			prompt += p.Text
 		}
 	}
-	logInvocation("opencode", prompt, []string{"session", sessionID})
+	model := ""
+	served := fakeOpencodeDefaultModel
+	if body.Model != nil {
+		model = body.Model.ProviderID + "/" + body.Model.ModelID
+		served = opencodeServedModel{ProviderID: body.Model.ProviderID, ModelID: body.Model.ModelID}
+	}
+	writeInvocation(invocation{Agent: "opencode", Args: []string{"session", sessionID}, Prompt: prompt, Model: model, Variant: body.Variant})
 
 	if s.fixture != nil {
 		// Stream the recorded SSE bytes verbatim, then return the
@@ -351,19 +362,19 @@ func (s *fakeOpencodeServer) handleMessage(w http.ResponseWriter, r *http.Reques
 		// info field set) stays real; only the structured payload is
 		// substituted so happy-path tests don't depend on whatever
 		// the live model returned at recording time.
-		action := s.scenario.Match(prompt)
+		action := s.scenario.MatchInDir(s.sessionDir(sessionID), prompt)
 		if err := applyActionInDir(s.sessionDir(sessionID), action); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		framed, err := rewriteOpencodeFixtureSSE(s.fixture, action, sessionID)
+		framed, err := rewriteOpencodeFixtureSSE(s.fixture, action, sessionID, served)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "fakeagent: opencode sse patch: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		s.broadcastRaw(framed)
-		patched, err := rewriteOpencodeFixtureMessage(s.fixture, action, sessionID)
+		patched, err := rewriteOpencodeFixtureMessage(s.fixture, action, sessionID, served)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "fakeagent: opencode patch: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -374,7 +385,7 @@ func (s *fakeOpencodeServer) handleMessage(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	action := s.scenario.Match(prompt)
+	action := s.scenario.MatchInDir(s.sessionDir(sessionID), prompt)
 	if err := applyActionInDir(s.sessionDir(sessionID), action); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -395,19 +406,17 @@ func (s *fakeOpencodeServer) handleMessage(w http.ResponseWriter, r *http.Reques
 	// the same shape the real OpenCode emits.
 	respText := action.textOrDefault()
 	s.broadcast(eventMessagePartUpdated(sessionID, asstID, asstPartID, respText))
-	s.broadcast(eventMessageUpdatedAssistant(sessionID, asstID))
+	s.broadcast(eventMessageUpdatedAssistant(sessionID, asstID, served))
 	s.broadcast(eventSessionIdle(sessionID))
 
 	// The synchronous message response carries the structured output.
 	resp := map[string]any{
 		"info": map[string]any{
-			"id":   asstID,
-			"role": "assistant",
-			"tokens": map[string]any{
-				"input":  100,
-				"output": 50,
-				"cache":  map[string]int{"read": 0, "write": 0},
-			},
+			"id":         asstID,
+			"role":       "assistant",
+			"modelID":    served.ModelID,
+			"providerID": served.ProviderID,
+			"tokens":     syntheticOpencodeTokens(),
 		},
 		"parts": []map[string]any{
 			{"type": "text", "text": respText},
@@ -451,23 +460,58 @@ func eventMessageUpdated(sessionID, msgID, role string) map[string]any {
 	}
 }
 
-func eventMessageUpdatedAssistant(sessionID, msgID string) map[string]any {
+func eventMessageUpdatedAssistant(sessionID, msgID string, served opencodeServedModel) map[string]any {
 	return map[string]any{
 		"payload": map[string]any{
 			"type": "message.updated",
 			"properties": map[string]any{
 				"sessionID": sessionID,
 				"info": map[string]any{
-					"id":   msgID,
-					"role": "assistant",
-					"tokens": map[string]any{
-						"input":  100,
-						"output": 50,
-						"cache":  map[string]int{"read": 0, "write": 0},
-					},
+					"id":         msgID,
+					"role":       "assistant",
+					"modelID":    served.ModelID,
+					"providerID": served.ProviderID,
+					"tokens":     syntheticOpencodeTokens(),
 				},
 			},
 		},
+	}
+}
+
+// syntheticOpencodeTokens is the usage every synthetic assistant message
+// reports, reasoning apart from output as opencode reports it.
+func syntheticOpencodeTokens() map[string]any {
+	return map[string]any{
+		"input":     100,
+		"output":    50,
+		"reasoning": 25,
+		"cache":     map[string]int{"read": 0, "write": 0},
+	}
+}
+
+// opencodeServedModel is the model an assistant message reports serving it.
+type opencodeServedModel struct {
+	ProviderID string
+	ModelID    string
+}
+
+// fakeOpencodeDefaultModel serves a message whose body names no model, the
+// way opencode falls back to its own configured default. It is the model the
+// recorded fixtures were served by, so both modes agree.
+var fakeOpencodeDefaultModel = opencodeServedModel{ProviderID: "openai", ModelID: "gpt-5.4"}
+
+// patchOpencodeServedModel makes a recorded message info answer for the
+// requested model: an assistant message reports it as served (modelID,
+// providerID) and a user message as requested (its nested model object).
+func patchOpencodeServedModel(info map[string]any, served opencodeServedModel) {
+	switch info["role"] {
+	case "assistant":
+		info["modelID"] = served.ModelID
+		info["providerID"] = served.ProviderID
+	case "user":
+		if _, ok := info["model"].(map[string]any); ok {
+			info["model"] = map[string]any{"providerID": served.ProviderID, "modelID": served.ModelID}
+		}
 	}
 }
 
@@ -491,7 +535,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 // response so the scenario controls the structured payload while the
 // rest of the response (info.id, role, tokens, parts shape) stays
 // faithful to what real opencode emitted.
-func patchOpencodeMessage(raw []byte, action Action) ([]byte, error) {
+func patchOpencodeMessage(raw []byte, action Action, served opencodeServedModel) ([]byte, error) {
 	var resp map[string]any
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, fmt.Errorf("parse message: %w", err)
@@ -503,6 +547,7 @@ func patchOpencodeMessage(raw []byte, action Action) ([]byte, error) {
 	if action.hasStructuredOutput() {
 		info["structured"] = json.RawMessage(action.structuredJSON())
 	}
+	patchOpencodeServedModel(info, served)
 	resp["info"] = info
 	patchOpencodeMessageParts(resp, action.textOrDefault())
 	return json.Marshal(resp)
@@ -515,7 +560,7 @@ func rewriteOpencodeFixtureSession(fixture *opencodeFixture, sessionID string) (
 	return rewriteOpencodeFixtureJSON(fixture.session, fixture.sessionID, sessionID)
 }
 
-func rewriteOpencodeFixtureSSE(fixture *opencodeFixture, action Action, sessionID string) ([]byte, error) {
+func rewriteOpencodeFixtureSSE(fixture *opencodeFixture, action Action, sessionID string, served opencodeServedModel) ([]byte, error) {
 	if fixture == nil {
 		return nil, fmt.Errorf("rewrite sse: missing fixture")
 	}
@@ -536,6 +581,10 @@ func rewriteOpencodeFixtureSSE(fixture *opencodeFixture, action Action, sessionI
 		if err != nil {
 			return nil, fmt.Errorf("patch sse event: %w", err)
 		}
+		patched, err = patchOpencodeEventServedModel(patched, served)
+		if err != nil {
+			return nil, fmt.Errorf("patch sse event model: %w", err)
+		}
 		patched, err = rewriteOpencodeFixtureJSON(patched, fixture.sessionID, sessionID)
 		if err != nil {
 			return nil, fmt.Errorf("rewrite sse event: %w", err)
@@ -547,15 +596,35 @@ func rewriteOpencodeFixtureSSE(fixture *opencodeFixture, action Action, sessionI
 	return out.Bytes(), nil
 }
 
-func rewriteOpencodeFixtureMessage(fixture *opencodeFixture, action Action, sessionID string) ([]byte, error) {
+func rewriteOpencodeFixtureMessage(fixture *opencodeFixture, action Action, sessionID string, served opencodeServedModel) ([]byte, error) {
 	if fixture == nil {
 		return nil, fmt.Errorf("rewrite message: missing fixture")
 	}
-	patched, err := patchOpencodeMessage(fixture.message, action)
+	patched, err := patchOpencodeMessage(fixture.message, action, served)
 	if err != nil {
 		return nil, err
 	}
 	return rewriteOpencodeFixtureJSON(patched, fixture.sessionID, sessionID)
+}
+
+// patchOpencodeEventServedModel applies patchOpencodeServedModel to a
+// message.updated event's info; every other event passes through unchanged.
+func patchOpencodeEventServedModel(raw []byte, served opencodeServedModel) ([]byte, error) {
+	var event map[string]any
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return nil, fmt.Errorf("parse json: %w", err)
+	}
+	payload, _ := event["payload"].(map[string]any)
+	if payload == nil || payload["type"] != "message.updated" {
+		return raw, nil
+	}
+	props, _ := payload["properties"].(map[string]any)
+	info, _ := props["info"].(map[string]any)
+	if info == nil {
+		return raw, nil
+	}
+	patchOpencodeServedModel(info, served)
+	return json.Marshal(event)
 }
 
 type opencodeSSETextPatcher struct {

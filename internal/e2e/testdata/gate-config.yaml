@@ -1,0 +1,24 @@
+# Mirrors the routing keys of the live gate's global config as of 2026-10-24:
+# the agent, the per-step models, the auto_fix budget and intent extraction,
+# with the gate's values. Keys that do not affect routing are left out.
+agent: opencode
+
+agent_model:
+  opencode:
+    review: deepseek/deepseek-v4-pro
+    test: deepseek/deepseek-flash
+    document: deepseek/deepseek-flash
+    lint: deepseek/deepseek-flash
+
+auto_fix:
+  rebase: 3
+  lint: 3
+  test: 3
+  review: 0
+  document: 3
+  ci: 3
+
+intent:
+  enabled: true
+  threshold: 0.2
+  slack_days: 3

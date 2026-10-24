@@ -22,6 +22,7 @@ func TestDefaultUsesDotEnvInDevBuildWhenEnvMissing(t *testing.T) {
 	buildinfo.TelemetryHost = ""
 	buildinfo.TelemetryWebsiteID = ""
 
+	t.Setenv(telemetryEnv, "")
 	t.Setenv(umamiHostEnv, "")
 	t.Setenv(umamiWebsiteIDEnv, "")
 
@@ -71,6 +72,7 @@ func TestDefaultPrefersEnvVarsOverDotEnvAndEmbeddedConfig(t *testing.T) {
 	buildinfo.Version = "v1.2.3"
 	buildinfo.TelemetryWebsiteID = "embedded-website"
 
+	t.Setenv(telemetryEnv, "")
 	t.Setenv(umamiHostEnv, "https://env.example")
 	t.Setenv(umamiWebsiteIDEnv, "website-from-env")
 
@@ -120,6 +122,7 @@ func TestDefaultUsesEmbeddedTelemetryHostAndWebsiteID(t *testing.T) {
 	buildinfo.Version = "v1.2.3"
 	buildinfo.TelemetryWebsiteID = "embedded-website"
 
+	t.Setenv(telemetryEnv, "")
 	t.Setenv(umamiHostEnv, "")
 	t.Setenv(umamiWebsiteIDEnv, "")
 
@@ -136,7 +139,7 @@ func TestDefaultUsesEmbeddedTelemetryHostAndWebsiteID(t *testing.T) {
 	}
 }
 
-func TestDefaultUsesSelfHostedHostWhenHostConfigMissing(t *testing.T) {
+func TestDefaultIsNoopWhenHostConfigMissing(t *testing.T) {
 	prevSink := defaultSink
 	defaultSink = nil
 	defer func() { defaultSink = prevSink }()
@@ -153,16 +156,14 @@ func TestDefaultUsesSelfHostedHostWhenHostConfigMissing(t *testing.T) {
 	buildinfo.Version = "v1.2.3"
 	buildinfo.TelemetryWebsiteID = "embedded-website"
 
+	t.Setenv(telemetryEnv, "")
 	t.Setenv(umamiHostEnv, "")
 	t.Setenv(umamiWebsiteIDEnv, "")
 
-	sink := Default()
-	client, ok := sink.(*Client)
-	if !ok {
-		t.Fatalf("Default() type = %T, want *Client", sink)
-	}
-	if client.endpoint != defaultHost+"/api/send" {
-		t.Fatalf("endpoint = %q, want %q", client.endpoint, defaultHost+"/api/send")
+	// The fork has no fallback analytics host, so a website ID alone sends
+	// nothing.
+	if _, ok := Default().(*Client); ok {
+		t.Fatal("Default() should disable telemetry when no host is configured")
 	}
 }
 

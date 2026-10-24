@@ -32,6 +32,7 @@ func TestAgentPath_DefaultBinaries(t *testing.T) {
 	}{
 		{types.AgentClaude, "claude"},
 		{types.AgentCodex, "codex"},
+		{types.AgentGrok, "grok"},
 		{types.AgentRovoDev, "acli"},
 		{types.AgentOpenCode, "opencode"},
 		{types.AgentPi, "pi"},
@@ -45,7 +46,50 @@ func TestAgentPath_DefaultBinaries(t *testing.T) {
 	}
 }
 
-func TestAgentPath_ACPUsesAcpxPath(t *testing.T) {
+func TestResolveAgentExplicitGrok(t *testing.T) {
+	cfg := &Config{Agent: types.AgentGrok}
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		if bin != "grok" {
+			t.Fatalf("lookPath(%q), want grok", bin)
+		}
+		return "/usr/local/bin/grok", nil
+	})
+	if err != nil {
+		t.Fatalf("ResolveAgent() error = %v", err)
+	}
+	if cfg.Agent != types.AgentGrok {
+		t.Fatalf("agent = %q, want grok", cfg.Agent)
+	}
+}
+
+func TestResolveAgentAutoFallsBackToGrok(t *testing.T) {
+	cfg := &Config{Agent: types.AgentAuto}
+	var probes []string
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		probes = append(probes, bin)
+		if bin == "grok" {
+			return "/usr/local/bin/grok", nil
+		}
+		return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+	})
+	if err != nil {
+		t.Fatalf("ResolveAgent() error = %v", err)
+	}
+	if cfg.Agent != types.AgentGrok {
+		t.Fatalf("agent = %q, want grok", cfg.Agent)
+	}
+	want := []string{"claude", "codex", "grok"}
+	if len(probes) != len(want) {
+		t.Fatalf("probe order = %v, want %v", probes, want)
+	}
+	for i := range want {
+		if probes[i] != want[i] {
+			t.Fatalf("probe order = %v, want %v", probes, want)
+		}
+	}
+}
+
+func TestAgentPath_ACPAndAliasesUseAcpxPath(t *testing.T) {
 	tests := []struct {
 		name string
 		cfg  *Config
@@ -53,6 +97,8 @@ func TestAgentPath_ACPUsesAcpxPath(t *testing.T) {
 	}{
 		{name: "default", cfg: &Config{Agent: "acp:gemini"}, want: "acpx"},
 		{name: "override", cfg: &Config{Agent: "acp:gemini", ACPXPath: "/opt/bin/acpx"}, want: "/opt/bin/acpx"},
+		{name: "alias-default", cfg: &Config{Agent: types.AgentCursor}, want: "acpx"},
+		{name: "alias-override", cfg: &Config{Agent: types.AgentCursor, ACPXPath: "/opt/bin/acpx"}, want: "/opt/bin/acpx"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -217,6 +263,43 @@ func TestResolveAgent_ListPicksFirstAvailableAndKeepsFallbacks(t *testing.T) {
 	}
 }
 
+func TestResolveAgent_ListDeduplicatesEquivalentACPTargets(t *testing.T) {
+	tests := []struct {
+		name       string
+		candidates []types.AgentName
+		want       types.AgentName
+	}{
+		{name: "alias before target", candidates: []types.AgentName{types.AgentCursor, "acp:cursor"}, want: types.AgentCursor},
+		{name: "target before alias", candidates: []types.AgentName{"acp:cursor", types.AgentCursor}, want: "acp:cursor"},
+		{name: "auto before target", candidates: []types.AgentName{types.AgentAuto, "acp:cursor"}, want: types.AgentCursor},
+		{name: "devin alias before target", candidates: []types.AgentName{types.AgentDevin, "acp:devin"}, want: types.AgentDevin},
+		{name: "devin target before alias", candidates: []types.AgentName{"acp:devin", types.AgentDevin}, want: "acp:devin"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Agents: tt.candidates}
+			err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+				switch bin {
+				case "cursor-agent", "devin", "acpx":
+					return "/usr/bin/" + bin, nil
+				default:
+					return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+				}
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Agent != tt.want {
+				t.Errorf("agent = %q, want %q", cfg.Agent, tt.want)
+			}
+			if len(cfg.Agents) != 1 || cfg.Agents[0] != tt.want {
+				t.Fatalf("agents = %v, want [%s]", cfg.Agents, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveAgent_ListSkipsUnavailableAuto(t *testing.T) {
 	cfg := &Config{Agents: []types.AgentName{types.AgentAuto, "acp:gemini"}}
 
@@ -313,7 +396,7 @@ func TestResolveAgent_AutoSkipsRovoDevWithoutSubcommand(t *testing.T) {
 
 	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
 		switch bin {
-		case "claude", "codex", "opencode", "pi", "copilot":
+		case "claude", "codex", "grok", "opencode", "pi", "copilot", "agy", "cursor-agent", "devin", "acpx":
 			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
 		case "acli":
 			return "/usr/bin/acli", nil
@@ -345,7 +428,7 @@ func TestResolveAgent_AutoReturnsRovoDevProbeExitError(t *testing.T) {
 
 	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
 		switch bin {
-		case "claude", "codex", "opencode", "pi":
+		case "claude", "codex", "grok", "opencode", "pi":
 			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
 		case "acli":
 			return script, nil
@@ -426,6 +509,353 @@ func TestResolveAgent_AutoNoneAvailableIncludesOverridePaths(t *testing.T) {
 	}
 }
 
+func TestResolveAgent_AutoSkipsACPAliasWithoutAcpx(t *testing.T) {
+	// cursor is an ACP alias. Its underlying command is on PATH, but the acpx
+	// shim it runs through is not, so auto must not select it.
+	cfg := &Config{Agent: types.AgentAuto}
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		if bin == "cursor-agent" {
+			return "/usr/bin/cursor-agent", nil
+		}
+		return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+	})
+	if err == nil {
+		t.Fatalf("expected error when acpx is missing, got agent %q", cfg.Agent)
+	}
+	if !strings.Contains(err.Error(), "no runnable agent found") {
+		t.Errorf("expected 'no runnable agent found', got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "acpx") {
+		t.Errorf("expected error to list the missing acpx binary, got: %v", err)
+	}
+}
+
+func TestResolveAgent_AutoPicksACPAliasWhenBinariesPresent(t *testing.T) {
+	cfg := &Config{Agent: types.AgentAuto}
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		switch bin {
+		case "cursor-agent":
+			return "/usr/bin/cursor-agent", nil
+		case "acpx":
+			return "/usr/bin/acpx", nil
+		default:
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != types.AgentCursor {
+		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentCursor)
+	}
+}
+
+// TestResolveAgent_AutoProbesDevinAfterNativeAgentsAndCursor proves auto
+// selects devin only when both devin and acpx resolve, and only once every
+// native agent and the cursor alias ahead of it is unavailable.
+func TestResolveAgent_AutoProbesDevinAfterNativeAgentsAndCursor(t *testing.T) {
+	tests := []struct {
+		name      string
+		available []string
+		want      types.AgentName
+		wantErr   bool
+	}{
+		{name: "devin and acpx", available: []string{"devin", "acpx"}, want: types.AgentDevin},
+		{name: "native agent wins", available: []string{"codex", "devin", "acpx"}, want: types.AgentCodex},
+		{name: "cursor wins", available: []string{"cursor-agent", "devin", "acpx"}, want: types.AgentCursor},
+		{name: "devin without acpx", available: []string{"devin"}, wantErr: true},
+		{name: "acpx without devin", available: []string{"acpx"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Agent: types.AgentAuto}
+			var probes []string
+			err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+				probes = append(probes, bin)
+				for _, available := range tt.available {
+					if bin == available {
+						return "/usr/bin/" + bin, nil
+					}
+				}
+				return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+			})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected no runnable agent, got %q", cfg.Agent)
+				}
+				if !strings.Contains(err.Error(), "devin") {
+					t.Errorf("error should list the probed devin binary, got: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Agent != tt.want {
+				t.Errorf("agent = %q, want %q (probes %v)", cfg.Agent, tt.want, probes)
+			}
+			if tt.want == types.AgentDevin {
+				cursorAt, devinAt := -1, -1
+				for i, bin := range probes {
+					switch bin {
+					case "cursor-agent":
+						cursorAt = i
+					case "devin":
+						devinAt = i
+					}
+				}
+				if cursorAt < 0 || devinAt < cursorAt {
+					t.Errorf("probes = %v, want devin probed after cursor-agent", probes)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveAgent_ListSkipsDevinWithoutItsCommandBinary(t *testing.T) {
+	for _, name := range []types.AgentName{types.AgentDevin, "acp:devin"} {
+		t.Run(string(name), func(t *testing.T) {
+			cfg := &Config{Agents: []types.AgentName{name, types.AgentClaude}}
+			err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+				switch bin {
+				case "acpx", "claude":
+					return "/usr/bin/" + bin, nil
+				default:
+					return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+				}
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Agent != types.AgentClaude || len(cfg.Agents) != 1 {
+				t.Fatalf("agent = %q agents = %v, want only claude", cfg.Agent, cfg.Agents)
+			}
+		})
+	}
+}
+
+func TestResolveAgent_DevinRegistryOverrideBinaryProbed(t *testing.T) {
+	cfg := &Config{
+		Agents:               []types.AgentName{types.AgentDevin},
+		ACPRegistryOverrides: map[string]string{"devin": "/opt/devin/bin/devin acp --model claude-opus-5-5-high"},
+	}
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		switch bin {
+		case "acpx", "/opt/devin/bin/devin":
+			return bin, nil
+		case "devin":
+			t.Fatalf("must probe the override binary, not the default devin")
+			return "", nil
+		default:
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != types.AgentDevin {
+		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentDevin)
+	}
+}
+
+func TestResolveAgent_ListSkipsACPAliasMissingCommandBinary(t *testing.T) {
+	cfg := &Config{Agents: []types.AgentName{types.AgentCursor, types.AgentClaude}}
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		switch bin {
+		case "acpx", "claude":
+			return "/usr/bin/" + bin, nil
+		default:
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != types.AgentClaude {
+		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentClaude)
+	}
+	if len(cfg.Agents) != 1 || cfg.Agents[0] != types.AgentClaude {
+		t.Fatalf("agents = %v, want [claude]", cfg.Agents)
+	}
+}
+
+func TestResolveAgent_ListPicksACPAliasWhenBinariesPresent(t *testing.T) {
+	cfg := &Config{Agents: []types.AgentName{types.AgentCursor}}
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		switch bin {
+		case "acpx", "cursor-agent":
+			return "/usr/bin/" + bin, nil
+		default:
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != types.AgentCursor {
+		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentCursor)
+	}
+}
+
+func TestResolveAgent_ListSkipsACPTargetMissingCommandBinary(t *testing.T) {
+	// acp:cursor runs the same raw command as the cursor alias, so list
+	// resolution must skip it when cursor-agent is missing even though acpx
+	// is present.
+	cfg := &Config{Agents: []types.AgentName{"acp:cursor", types.AgentClaude}}
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		switch bin {
+		case "acpx", "claude":
+			return "/usr/bin/" + bin, nil
+		default:
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != types.AgentClaude {
+		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentClaude)
+	}
+	if len(cfg.Agents) != 1 || cfg.Agents[0] != types.AgentClaude {
+		t.Fatalf("agents = %v, want [claude]", cfg.Agents)
+	}
+}
+
+func TestResolveAgent_ListKeepsACPTargetWhenBinariesPresent(t *testing.T) {
+	cfg := &Config{Agents: []types.AgentName{"acp:cursor", types.AgentClaude}}
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		switch bin {
+		case "acpx", "cursor-agent", "claude":
+			return "/usr/bin/" + bin, nil
+		default:
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != "acp:cursor" {
+		t.Errorf("agent = %q, want acp:cursor", cfg.Agent)
+	}
+}
+
+func TestResolveAgent_ACPTargetRegistryOverrideBinaryProbed(t *testing.T) {
+	// A registry override makes acp:gemini run `acpx --agent "gemini-cli acp"`,
+	// so the override's binary must be probed alongside acpx.
+	cfg := &Config{
+		Agents:               []types.AgentName{"acp:gemini", types.AgentClaude},
+		ACPRegistryOverrides: map[string]string{"gemini": "gemini-cli acp"},
+	}
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		switch bin {
+		case "acpx", "claude":
+			return "/usr/bin/" + bin, nil
+		default:
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != types.AgentClaude {
+		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentClaude)
+	}
+}
+
+func TestResolveAgent_ACPAliasRegistryOverrideBinaryProbed(t *testing.T) {
+	cfg := &Config{
+		Agents:               []types.AgentName{types.AgentCursor},
+		ACPRegistryOverrides: map[string]string{"cursor": "/opt/cursor/cursor-agent acp --profile work"},
+	}
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		switch bin {
+		case "acpx", "/opt/cursor/cursor-agent":
+			return bin, nil
+		case "cursor-agent":
+			t.Fatalf("must probe the override binary, not the default cursor-agent")
+			return "", nil
+		default:
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != types.AgentCursor {
+		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentCursor)
+	}
+}
+
+func TestResolveAgent_ACPAliasCommandAvailability(t *testing.T) {
+	tests := []struct {
+		name       string
+		override   string
+		wantErr    bool
+		wantProbes string
+	}{
+		{name: "default requires command binary", wantErr: true, wantProbes: "cursor-agent"},
+		{name: "relative override skips command probe", override: "./bin/local-agent acp", wantProbes: "acpx"},
+		{name: "quoted override skips command probe", override: `"/opt/Cursor Agent/cursor-agent" acp`, wantProbes: "acpx"},
+		{name: "escaped absolute override skips command probe", override: `/opt/Cursor\ Agent/cursor-agent acp`, wantProbes: "acpx"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Agent: types.AgentCursor}
+			if tt.override != "" {
+				cfg.ACPRegistryOverrides = map[string]string{"cursor": tt.override}
+			}
+			var probes []string
+			err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+				probes = append(probes, bin)
+				if bin == "acpx" {
+					return "/usr/bin/acpx", nil
+				}
+				return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+			})
+			if tt.wantErr && err == nil {
+				t.Fatal("expected unavailable agent to fail resolution")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := strings.Join(probes, ", "); got != tt.wantProbes {
+				t.Errorf("probes = %q, want %q", got, tt.wantProbes)
+			}
+		})
+	}
+}
+
+func TestACPCommandBinaryForProbeForOS(t *testing.T) {
+	tests := []struct {
+		name    string
+		goos    string
+		command string
+		wantBin string
+		wantOK  bool
+	}{
+		{name: "windows drive path", goos: "windows", command: `C:\tools\cursor-agent.exe acp`, wantBin: `C:\tools\cursor-agent.exe`, wantOK: true},
+		{name: "windows UNC path", goos: "windows", command: `\\host\share\cursor-agent.exe acp`, wantBin: `\\host\share\cursor-agent.exe`, wantOK: true},
+		{name: "unix absolute path", goos: "linux", command: "/opt/cursor-agent acp", wantBin: "/opt/cursor-agent", wantOK: true},
+		{name: "unix escaped space", goos: "linux", command: `/opt/Cursor\ Agent/cursor-agent acp`},
+		{name: "windows double-quoted path", goos: "windows", command: `"C:\Program Files\cursor-agent.exe" acp`},
+		{name: "windows single-quoted path", goos: "windows", command: `'C:\Program Files\cursor-agent.exe' acp`},
+		{name: "unix double-quoted path", goos: "linux", command: `"/opt/Cursor Agent/cursor-agent" acp`},
+		{name: "unix single-quoted path", goos: "linux", command: `'/opt/Cursor Agent/cursor-agent' acp`},
+		{name: "relative path", goos: "linux", command: "./bin/x acp"},
+		{name: "bare command", goos: "linux", command: "cursor-agent acp", wantBin: "cursor-agent", wantOK: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotBin, gotOK := acpCommandBinaryForProbeForOS(tt.command, tt.goos)
+			if gotBin != tt.wantBin || gotOK != tt.wantOK {
+				t.Errorf("acpCommandBinaryForProbeForOS(%q, %q) = (%q, %t), want (%q, %t)", tt.command, tt.goos, gotBin, gotOK, tt.wantBin, tt.wantOK)
+			}
+		})
+	}
+}
+
 func TestResolveAgent_AutoPassesContextToRovoDevProbe(t *testing.T) {
 	cfg := &Config{Agent: types.AgentAuto}
 	originalProbe := probeRovoDevSupport
@@ -446,7 +876,7 @@ func TestResolveAgent_AutoPassesContextToRovoDevProbe(t *testing.T) {
 
 	err := cfg.ResolveAgent(ctx, func(bin string) (string, error) {
 		switch bin {
-		case "claude", "codex", "opencode", "pi":
+		case "claude", "codex", "grok", "opencode", "pi":
 			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
 		case "acli":
 			return "/usr/bin/acli", nil
