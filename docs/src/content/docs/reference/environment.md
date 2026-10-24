@@ -266,7 +266,7 @@ Run IDs, repository paths, branch names, session identities, prompts, model outp
 Repository-declared [gate](/no-mistakes/reference/repo-config/#gates) labels stay local. Remote step, approval, fix, and failed-step fields record them as the fixed token `gate`.
 
 Detailed performance evidence stays on the machine in the local state database (`<NM_HOME>/state.sqlite`): one `agent_invocations` row per agent invocation, plus each run's accumulated parked-at-gate time.
-Each row records run and step identity, purpose (such as review/review-fix/housekeeping), the reported model and its provider, the cold/started/resumed/fallback session mode, a truncated session-identity hash, timestamps, duration, exit status, and failure category, alongside the session-fidelity metrics below.
+Each row records run and step identity, purpose (such as review/review-fix/ci-fix/housekeeping), the reported model and its provider, the cold/started/resumed/fallback session mode, a truncated session-identity hash, timestamps, duration, exit status, and failure category, alongside the session-fidelity metrics below.
 It never stores prompts, model outputs, diffs, raw command arguments, secret values, or credentials - only bounded counts, low-cardinality categories, and durations.
 
 Token counts and the additive session-fidelity fields are nullable and read back as unknown (rendered `-`) rather than a fabricated zero when the adapter did not report them, so a failed or cancelled invocation, a row written before a field existed, and an adapter that does not surface a datum stay honest.

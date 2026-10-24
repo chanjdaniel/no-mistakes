@@ -18,11 +18,26 @@ const agentModelHarness = types.AgentOpenCode
 // routing. A step key routes every agent invocation of that step. A fix-round
 // key (<step>-fix) routes only that step's fix-round invocations; a fix round
 // without its own key falls back to its step's key (see AgentModelFor).
+//
+// The step keys are every built-in step that invokes an agent (push never
+// does; custom gate steps are out of scope). The fix-round keys are the fix
+// rounds that are their own agent invocation, with a purpose of <step>-fix:
+// review, test and lint (executeFixMode) and the CI repair. Rebase's conflict
+// resolution runs only in its fix round but is that step's only invocation, so
+// its step key already routes it; document has no fix round of its own.
 var agentModelKeys = []string{
+	string(types.StepIntent),
+	string(types.StepRebase),
 	string(types.StepReview),
 	string(types.StepTest),
 	string(types.StepDocument),
 	string(types.StepLint),
+	string(types.StepPR),
+	string(types.StepCI),
+	string(types.StepReview) + "-fix",
+	string(types.StepTest) + "-fix",
+	string(types.StepLint) + "-fix",
+	string(types.StepCI) + "-fix",
 }
 
 // AgentModelKeys returns every valid agent_model key, sorted.
@@ -62,8 +77,9 @@ func parseAgentModel(raw map[string]map[string]string) (map[string]string, error
 	return routes, nil
 }
 
-// agentModelReviewKeys are the agent_model keys that route the review loop.
-var agentModelReviewKeys = []string{string(types.StepReview)}
+// agentModelReviewKeys are the agent_model keys that route the review loop,
+// the reviewer's and the fixer's turns that review_agents also selects.
+var agentModelReviewKeys = []string{string(types.StepReview), string(types.StepReview) + "-fix"}
 
 // validateAgentModelReviewAgents refuses a review loop configured in both
 // agent_model and review_agents. Ranking them instead would let a per-step

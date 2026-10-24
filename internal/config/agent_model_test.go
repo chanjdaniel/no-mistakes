@@ -58,12 +58,22 @@ func TestLoadGlobal_AgentModelRejectsBadInput(t *testing.T) {
 		{
 			name: "unknown key lists the valid ones",
 			yaml: "agent_model:\n  opencode:\n    reveiw: deepseek/deepseek-v4-pro\n",
-			want: []string{`agent_model.opencode key "reveiw"`, "valid: document, lint, review, test"},
+			want: []string{`agent_model.opencode key "reveiw"`, "valid: ci, ci-fix, document, intent, lint, lint-fix, pr, rebase, review, review-fix, test, test-fix)"},
 		},
 		{
 			name: "push has no agent",
 			yaml: "agent_model:\n  opencode:\n    push: deepseek/deepseek-flash\n",
 			want: []string{`agent_model.opencode key "push"`},
+		},
+		{
+			name: "document has no fix round of its own",
+			yaml: "agent_model:\n  opencode:\n    document-fix: deepseek/deepseek-flash\n",
+			want: []string{`agent_model.opencode key "document-fix"`},
+		},
+		{
+			name: "custom gate fix round",
+			yaml: "agent_model:\n  opencode:\n    gate.security-fix: deepseek/deepseek-flash\n",
+			want: []string{`agent_model.opencode key "gate.security-fix"`},
 		},
 		{
 			name: "custom gate step",
@@ -116,25 +126,27 @@ func TestLoadGlobal_AgentModelRejectsBadInput(t *testing.T) {
 // The review loop is configured in agent_model or in review_agents, never in
 // both: a per-step route would silently override a role's model, and with the
 // *_after_round roles it would silently cancel upstream's escalation.
-func TestLoadGlobal_AgentModelReviewRefusedBesideAnyReviewAgentsRole(t *testing.T) {
-	for _, role := range ReviewAgentRoles {
-		t.Run(role, func(t *testing.T) {
-			yaml := "agent: opencode\n" +
-				"agent_model:\n  opencode:\n    review: deepseek/deepseek-v4-pro\n" +
-				"review_agents:\n  " + role + ": {agent: opencode, model: deepseek/deepseek-flash}\n"
-			err := loadGlobalConfigError(t, yaml)
-			for _, want := range []string{"agent_model.opencode.review", "review_agents." + role} {
-				if !strings.Contains(err.Error(), want) {
-					t.Fatalf("error %q does not name %q", err, want)
+func TestLoadGlobal_AgentModelReviewLoopRefusedBesideAnyReviewAgentsRole(t *testing.T) {
+	for _, key := range []string{"review", "review-fix"} {
+		for _, role := range ReviewAgentRoles {
+			t.Run(key+"/"+role, func(t *testing.T) {
+				yaml := "agent: opencode\n" +
+					"agent_model:\n  opencode:\n    " + key + ": deepseek/deepseek-v4-pro\n" +
+					"review_agents:\n  " + role + ": {agent: opencode, model: deepseek/deepseek-flash}\n"
+				err := loadGlobalConfigError(t, yaml)
+				for _, want := range []string{"agent_model.opencode." + key + " conflicts", "review_agents." + role} {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("error %q does not name %q", err, want)
+					}
 				}
-			}
-		})
+			})
+		}
 	}
 }
 
 func TestLoadGlobal_AgentModelOtherStepsCoexistWithReviewAgents(t *testing.T) {
 	cfg := writeGlobalConfig(t, "agent: opencode\n"+
-		"agent_model:\n  opencode:\n    test: deepseek/deepseek-flash\n    document: deepseek/deepseek-flash\n"+
+		"agent_model:\n  opencode:\n    test: deepseek/deepseek-flash\n    test-fix: deepseek/deepseek-v4-pro\n    document: deepseek/deepseek-flash\n    ci-fix: deepseek/deepseek-v4-pro\n"+
 		"review_agents:\n  reviewer: {agent: opencode, model: deepseek/deepseek-v4-pro}\n")
 	if cfg.AgentModel["test"] != "deepseek/deepseek-flash" || cfg.ReviewAgents["reviewer"].Model != "deepseek/deepseek-v4-pro" {
 		t.Fatalf("AgentModel = %#v, ReviewAgents = %#v", cfg.AgentModel, cfg.ReviewAgents)
@@ -195,6 +207,51 @@ agent_model:
 			model, key := cfg.AgentModelFor(tt.step, tt.purpose)
 			if model != tt.wantModel || key != tt.wantKey {
 				t.Fatalf("AgentModelFor(%q, %q) = (%q, %q), want (%q, %q)", tt.step, tt.purpose, model, key, tt.wantModel, tt.wantKey)
+			}
+		})
+	}
+}
+
+// Every key set: each step's invocations take its step key, and each of the
+// four fix rounds that is its own invocation takes its fix-round key.
+func TestAgentModelForResolvesEveryKey(t *testing.T) {
+	var yaml strings.Builder
+	yaml.WriteString("agent: opencode\nagent_model:\n  opencode:\n")
+	for _, key := range AgentModelKeys() {
+		yaml.WriteString("    " + key + ": p/" + key + "\n")
+	}
+	cfg := Merge(writeGlobalConfig(t, yaml.String()), &RepoConfig{})
+	tests := []struct {
+		step    types.StepName
+		purpose string
+		wantKey string
+	}{
+		{types.StepIntent, "", "intent"},
+		{types.StepRebase, "", "rebase"},
+		{types.StepReview, "review", "review"},
+		{types.StepReview, "review-fix", "review-fix"},
+		{types.StepTest, "", "test"},
+		{types.StepTest, "test-fix", "test-fix"},
+		{types.StepDocument, "document", "document"},
+		{types.StepDocument, "housekeeping", "document"},
+		{types.StepLint, "lint", "lint"},
+		{types.StepLint, "lint-fix", "lint-fix"},
+		{types.StepPR, "", "pr"},
+		{types.StepCI, "ci-fix", "ci-fix"},
+		{types.StepPush, "", ""},
+		{types.StepName("gate.security"), "gate.security-fix", ""},
+		// A fix-round key routes only its own step's fix round.
+		{types.StepReview, "test-fix", "review"},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.step)+"/"+tt.purpose, func(t *testing.T) {
+			model, key := cfg.AgentModelFor(tt.step, tt.purpose)
+			wantModel := ""
+			if tt.wantKey != "" {
+				wantModel = "p/" + tt.wantKey
+			}
+			if model != wantModel || key != tt.wantKey {
+				t.Fatalf("AgentModelFor(%q, %q) = (%q, %q), want (%q, %q)", tt.step, tt.purpose, model, key, wantModel, tt.wantKey)
 			}
 		})
 	}

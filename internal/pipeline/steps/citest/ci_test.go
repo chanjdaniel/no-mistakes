@@ -250,6 +250,43 @@ func TestCIStep_Execute_FixMode_RemoteAlreadyUpdatedDoesNotReturnManualIntervent
 	}
 }
 
+// The CI repair is its own agent invocation with the purpose ci-fix, so
+// agent_model's ci-fix key can route it and stats can tell it apart.
+func TestCIStep_FixRoundInvokesTheAgentWithTheCIFixPurpose(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)
+	env := stepstest.FakeCIGHMergeable(t, "OPEN", `[{"name":"build","state":"FAILURE","bucket":"fail"}]`, "MERGEABLE")
+
+	var purposes []string
+	ag := &stepstest.MockAgent{
+		AgentName: "test",
+		RunFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			purposes = append(purposes, opts.Purpose)
+			return &agent.Result{}, nil
+		},
+	}
+	sctx := stepstest.NewTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx.Run.PRURL = &prURL
+	sctx.Fixing = true
+	sctx.PreviousFindings = stepstest.CIGateFindingsJSON("build")
+	sctx.Config.CITimeout = 30 * time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+
+	step := (&steps.CIStep{}).SetWaitForNextPoll(func(ctx context.Context, interval time.Duration) error {
+		cancel()
+		return ctx.Err()
+	})
+	_, _ = step.Execute(sctx)
+
+	if len(purposes) != 1 || purposes[0] != "ci-fix" {
+		t.Fatalf("CI fix round invoked the agent with purposes %q, want exactly one ci-fix", purposes)
+	}
+}
+
 func TestCIStep_PRMergedExitsEarly(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)

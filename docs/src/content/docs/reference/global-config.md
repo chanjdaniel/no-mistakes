@@ -411,12 +411,13 @@ authoritative.
 ### agent_model
 
 Optional, **global-only** per-step model routing for `opencode`, a feature of this fork.
-Each key names a pipeline step, and every agent invocation of that step, its fix round included, asks opencode for that model.
+Each step key names a pipeline step, and every agent invocation of that step, its fix round included, asks opencode for that model.
+A fix-round key routes only that step's fix round, so a step can run on a cheap model and escalate its fix round.
 
 |         |                                                         |
 | ------- | ------------------------------------------------------- |
-| Type    | `map[opencode]map[step]provider/model`                  |
-| Keys    | `review`, `test`, `document`, `lint`                    |
+| Type    | `map[opencode]map[key]provider/model`                   |
+| Keys    | Steps: `intent`, `rebase`, `review`, `test`, `document`, `lint`, `pr`, `ci`; fix rounds: `review-fix`, `test-fix`, `lint-fix`, `ci-fix` |
 | Default | Empty (every step runs on the profile below)            |
 
 ```yaml
@@ -429,16 +430,20 @@ agent_model:
     lint: deepseek/deepseek-flash
 ```
 
-A step's fix round (`review-fix`, `test-fix`, the lint fix pass) uses its step's model.
+A fix round uses its own key when set, else its step's key: `review-fix` is the review fixer's turn, `test-fix` the Test fix pass, `lint-fix` the Lint fix pass, and `ci-fix` the CI repair.
+`ci` therefore routes the CI repair too while `ci-fix` is unset, because the repair is the CI step's only agent invocation.
+The `rebase` key routes the conflict resolver, the Rebase step's only invocation, so it has no fix-round key of its own; nor does `document`, which has no fix round.
+The `intent` key routes the intent summarizer and disambiguator, and `pr` the PR content and template calls.
 The `document` key also routes the combined document+lint housekeeping pass, because that pass runs in the Document step.
+`push` invokes no agent, and custom [gates](/no-mistakes/reference/repo-config/#gates) are not routed, so neither has a key.
 A step without a key carries no per-step model, so it runs on [`agent_config.opencode.model`](#agent_config) when set, else on opencode's own default.
 Reasoning effort is not routed: `agent_config.opencode.effort` applies to every invocation, routed or not.
 
 Only `opencode` is accepted, because it is the one harness whose model rides each session message; every other harness fixes its model in argv when it starts.
 Use `agent_config` and `review_agents` for those harnesses.
-These are refused at config load, each naming the key: a harness other than `opencode`, an unknown step key (the error lists the valid ones), an empty value (delete the key instead), and a value that is not `provider/model`.
+These are refused at config load, each naming the key: a harness other than `opencode`, an unknown key (the error lists the valid ones), an empty value (delete the key instead), and a value that is not `provider/model`.
 
-The review loop is configured in `agent_model` or in [`review_agents`](#review_agents), never both: routing `review` while any `review_agents` role is set is refused at load, naming both keys.
+The review loop is configured in `agent_model` or in [`review_agents`](#review_agents), never both: routing `review` or `review-fix` while any `review_agents` role is set is refused at load, naming both keys.
 A route would otherwise silently override the role's model, and with the `*_after_round` roles silently cancel the escalation.
 Routing the other steps alongside `review_agents` is fine.
 

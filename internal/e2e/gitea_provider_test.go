@@ -25,44 +25,8 @@ import (
 func TestGiteaProviderJourney(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude"})
 
-	const (
-		giteaHost  = "gitea.example.com"
-		repoSlug   = "owner/repo"
-		loginName  = "e2e"
-		remoteURL  = "https://" + giteaHost + "/" + repoSlug + ".git"
-		branchName = "feature/gitea-provider-e2e"
-	)
-
-	configureGitURLRewrite(t, h, remoteURL, h.UpstreamDir)
-	if out, err := h.runGit(t.Context(), h.WorkDir, "remote", "set-url", "origin", remoteURL); err != nil {
-		t.Fatalf("set gitea origin: %v\n%s", err, out)
-	}
-
-	// tea has no distinguishing hostname substring to detect by (unlike
-	// gitlab.com/github.com); scm.DetectProvider falls back to consulting
-	// tea's own config.yml for a login matching the remote's host. Isolate
-	// XDG_CONFIG_HOME explicitly rather than relying on the harness's HOME
-	// fallback, so an ambient XDG_CONFIG_HOME on the test host can never leak
-	// into this assertion.
-	xdgConfigHome := filepath.Join(h.HomeDir, ".config")
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
-	teaConfigDir := filepath.Join(xdgConfigHome, "tea")
-	if err := os.MkdirAll(teaConfigDir, 0o755); err != nil {
-		t.Fatalf("mkdir tea config dir: %v", err)
-	}
-	teaConfig := "logins:\n" +
-		"    - name: " + loginName + "\n" +
-		"      url: https://" + giteaHost + "\n" +
-		"      ssh_host: " + giteaHost + "\n" +
-		"      user: e2e-tea-user\n" +
-		"      token: xxx\n"
-	if err := os.WriteFile(filepath.Join(teaConfigDir, "config.yml"), []byte(teaConfig), 0o644); err != nil {
-		t.Fatalf("write tea config: %v", err)
-	}
-
-	teaLog := filepath.Join(filepath.Dir(h.AgentLog), "tea-provider.log")
-	t.Setenv("FAKEAGENT_TEA_LOG", teaLog)
-	t.Setenv("FAKEAGENT_TEA_HOST", giteaHost)
+	const branchName = "feature/gitea-provider-e2e"
+	teaLog := setupGiteaRemote(t, h)
 
 	if out, err := h.Run("init"); err != nil {
 		t.Fatalf("init: %v\n%s", err, out)
@@ -75,8 +39,8 @@ func TestGiteaProviderJourney(t *testing.T) {
 	if run.Status != types.RunCompleted {
 		t.Fatalf("run did not complete: status=%s error=%v", run.Status, deref(run.Error))
 	}
-	if run.PRURL == nil || !strings.HasPrefix(*run.PRURL, "http://"+giteaHost+"/"+repoSlug+"/pulls/") {
-		t.Fatalf("PR URL = %v, want a Gitea pull URL under %s/%s", run.PRURL, giteaHost, repoSlug)
+	if run.PRURL == nil || !strings.HasPrefix(*run.PRURL, "http://"+giteaHost+"/"+giteaRepoSlug+"/pulls/") {
+		t.Fatalf("PR URL = %v, want a Gitea pull URL under %s/%s", run.PRURL, giteaHost, giteaRepoSlug)
 	}
 
 	invocations := readTeaStubInvocations(t, teaLog)
@@ -91,16 +55,16 @@ func TestGiteaProviderJourney(t *testing.T) {
 		}
 		if len(inv.Args) >= 2 && inv.Args[0] == "pulls" && inv.Args[1] == "create" {
 			sawCreate = true
-			if inv.Repo != repoSlug {
-				t.Fatalf("pulls create --repo = %q, want %q: %+v", inv.Repo, repoSlug, inv)
+			if inv.Repo != giteaRepoSlug {
+				t.Fatalf("pulls create --repo = %q, want %q: %+v", inv.Repo, giteaRepoSlug, inv)
 			}
 			if inv.Head != branchName {
 				t.Fatalf("pulls create --head = %q, want %q: %+v", inv.Head, branchName, inv)
 			}
 		}
-		if inv.Login != "" && inv.Login != loginName {
+		if inv.Login != "" && inv.Login != giteaLoginName {
 			sawWrongLogin = true
-			t.Errorf("tea invocation used login %q, want the configured %q: %+v", inv.Login, loginName, inv)
+			t.Errorf("tea invocation used login %q, want the configured %q: %+v", inv.Login, giteaLoginName, inv)
 		}
 	}
 	if !sawAuthCheck {
@@ -112,6 +76,50 @@ func TestGiteaProviderJourney(t *testing.T) {
 	if sawWrongLogin {
 		t.Fatalf("a tea invocation targeted the wrong login: %+v", invocations)
 	}
+}
+
+const (
+	giteaHost      = "gitea.example.com"
+	giteaRepoSlug  = "owner/repo"
+	giteaLoginName = "e2e"
+)
+
+// setupGiteaRemote points the harness's origin at a Gitea host: a git URL
+// rewrite stands the upstream bare repository in for it, and tea's own
+// config.yml (which is how scm.DetectProvider recognizes a self-hosted Gitea,
+// since its hostname carries no distinguishing substring) names a login for
+// it. It returns the tea stub's invocation log.
+func setupGiteaRemote(t *testing.T, h *Harness) string {
+	t.Helper()
+	const remoteURL = "https://" + giteaHost + "/" + giteaRepoSlug + ".git"
+	configureGitURLRewrite(t, h, remoteURL, h.UpstreamDir)
+	if out, err := h.runGit(t.Context(), h.WorkDir, "remote", "set-url", "origin", remoteURL); err != nil {
+		t.Fatalf("set gitea origin: %v\n%s", err, out)
+	}
+
+	// Isolate XDG_CONFIG_HOME explicitly rather than relying on the
+	// harness's HOME fallback, so an ambient XDG_CONFIG_HOME on the test host
+	// can never leak into provider detection.
+	xdgConfigHome := filepath.Join(h.HomeDir, ".config")
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+	teaConfigDir := filepath.Join(xdgConfigHome, "tea")
+	if err := os.MkdirAll(teaConfigDir, 0o755); err != nil {
+		t.Fatalf("mkdir tea config dir: %v", err)
+	}
+	teaConfig := "logins:\n" +
+		"    - name: " + giteaLoginName + "\n" +
+		"      url: https://" + giteaHost + "\n" +
+		"      ssh_host: " + giteaHost + "\n" +
+		"      user: e2e-tea-user\n" +
+		"      token: xxx\n"
+	if err := os.WriteFile(filepath.Join(teaConfigDir, "config.yml"), []byte(teaConfig), 0o644); err != nil {
+		t.Fatalf("write tea config: %v", err)
+	}
+
+	teaLog := filepath.Join(filepath.Dir(h.AgentLog), "tea-provider.log")
+	t.Setenv("FAKEAGENT_TEA_LOG", teaLog)
+	t.Setenv("FAKEAGENT_TEA_HOST", giteaHost)
+	return teaLog
 }
 
 type teaStubInvocation struct {

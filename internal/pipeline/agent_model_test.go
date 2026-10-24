@@ -112,6 +112,40 @@ func TestExecutorRoutesEachInvocationToItsStepsModel(t *testing.T) {
 	}
 }
 
+// A fix-round key routes only its step's fix round, and the step log names
+// each key it resolved, once each.
+func TestExecutorRoutesAFixRoundToItsOwnKey(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	probe := &modelProbeAgent{name: "opencode"}
+	steps := []Step{
+		invokingStep(types.StepTest, agent.RunOpts{Prompt: "test"}, agent.RunOpts{Prompt: "fix", Purpose: "test-fix"}),
+		invokingStep(types.StepCI, agent.RunOpts{Prompt: "repair", Purpose: "ci-fix"}),
+	}
+	cfg := routedConfig(types.AgentOpenCode, map[string]string{"test": "p/test", "test-fix": "p/test-fix", "ci": "p/ci"})
+	exec := NewExecutor(database, p, cfg, probe, steps, nil)
+	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	for purpose, want := range map[string]string{"": "p/test", "test-fix": "p/test-fix", "ci-fix": "p/ci"} {
+		if got := probe.model(purpose); got != want {
+			t.Errorf("invocation %q carried model %q, want %q", purpose, got, want)
+		}
+	}
+	logDir := p.RunLogDir(run.ID)
+	testLog := readStepLog(t, logDir, types.StepTest)
+	for _, want := range []string{
+		"using agent_model override for step test: p/test (key test)",
+		"using agent_model override for step test: p/test-fix (key test-fix)",
+	} {
+		if got := strings.Count(testLog, want); got != 1 {
+			t.Errorf("test log has %d %q lines, want 1:\n%s", got, want, testLog)
+		}
+	}
+	if ciLog := readStepLog(t, logDir, types.StepCI); !strings.Contains(ciLog, "using agent_model override for step ci: p/ci (key ci)") {
+		t.Errorf("ci log does not name the ci route its repair fell back to:\n%s", ciLog)
+	}
+}
+
 func TestExecutorWithoutAgentModelRoutesAndLogsNothing(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	probe := &modelProbeAgent{name: "opencode"}

@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -335,5 +338,258 @@ func TestAgentModelKeepsAgentConfigEffortOnRealBinary(t *testing.T) {
 	}
 	if !steps["review"] || !steps["test"] {
 		t.Fatalf("run invoked steps %v, want review and an unrouted test", steps)
+	}
+}
+
+// Models for the new step and fix-round keys: intent, pr and ci share a
+// cheap model, test runs on a second and its fix round escalates to a third.
+const (
+	routedCheapModel    = "deepseek/cheap-flash-e2e"
+	routedTestOnlyModel = "deepseek/test-flash-e2e"
+	routedTestFixModel  = "deepseek/test-fix-pro-e2e"
+	routedCIFixModel    = "deepseek/ci-fix-pro-e2e"
+)
+
+const routingCIFixMarker = "The following CI checks have failed on this PR"
+
+// ciFixTurn is the scripted CI repair: it changes a file so the repair
+// publishes a new head, which the tea stub's CI cycle then reads as merged.
+const ciFixTurn = `  - match: "` + routingCIFixMarker + `"
+    text: "repaired the build"
+    edits:
+      - path: "ci.txt"
+        new: "build repaired\n"
+    stage: ["ci.txt"]
+    structured:
+      summary: "repair the build"
+      code_change_needed: true
+`
+
+// writeStepAndFixRoundScenario scripts a run whose first test pass fails and
+// is repaired by the test fix round, and whose CI build fails once and is
+// repaired by a CI fix round; every other turn is clean.
+func writeStepAndFixRoundScenario(t *testing.T) string {
+	t.Helper()
+	content := `actions:
+  - match: "` + routingTestFixMarker + `"
+    text: "fixed the failing test"
+    edits:
+      - path: "feature.txt"
+        old: "seed for fix-round routing\n"
+        new: "fixed for fix-round routing\n"
+    stage: ["feature.txt"]
+    structured:
+      summary: "fix failing test"
+` + ciFixTurn + `  - match: "` + routingRoundHistoryMarker + `"
+` + cleanRoutingResponse + `  - match: "` + routingTestMarker + `"
+    text: "the feature test fails"
+    structured:
+      findings:
+        - id: "routing-test"
+          severity: error
+          description: "feature test fails"
+          file: "feature.txt"
+          action: auto-fix
+      summary: "feature test fails"
+      tested:
+        - "fakeagent: simulated test run"
+      testing_summary: "simulated feature test failed"
+      artifacts: []
+      scenarios:
+        - name: "fakeagent: simulated end-to-end scenario"
+          result: fail
+          live: true
+          evidence: "fakeagent: simulated test run failed"
+          reason: ""
+      verdict: no-go
+  - match: "` + routingIntentMarker + `"
+    text: "summarized"
+    structured:
+      summary: "user wanted fix-round routing exercised"
+  -` + strings.TrimPrefix(cleanRoutingResponse, "   ")
+	return writeRoutingScenario(t, "step-and-fix-round-scenario.yaml", content)
+}
+
+// writeCIFixScenario scripts a run that is clean until its CI build fails
+// once and a CI fix round repairs it.
+func writeCIFixScenario(t *testing.T) string {
+	t.Helper()
+	content := "actions:\n" + ciFixTurn + "  -" + strings.TrimPrefix(cleanRoutingResponse, "   ")
+	return writeRoutingScenario(t, "ci-fix-scenario.yaml", content)
+}
+
+func writeRoutingScenario(t *testing.T, name, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+	return path
+}
+
+// setupGiteaCIRepair routes the harness to a Gitea host whose tea stub models
+// one CI cycle: the head the PR is created at fails its build, and the CI
+// repair's new head merges the PR.
+func setupGiteaCIRepair(t *testing.T, h *Harness) {
+	t.Helper()
+	setupGiteaRemote(t, h)
+	t.Setenv("FAKEAGENT_TEA_CI_REMOTE", h.UpstreamDir)
+	t.Setenv("FAKEAGENT_TEA_CI_STATE", filepath.Join(t.TempDir(), "tea-ci-state.json"))
+}
+
+func runAgentInvocations(t *testing.T, h *Harness, runID string) []db.AgentInvocation {
+	t.Helper()
+	database, err := db.Open(paths.WithRoot(h.NMHome).DB())
+	if err != nil {
+		t.Fatalf("open e2e db: %v", err)
+	}
+	defer database.Close()
+	rows, err := database.GetAgentInvocationsByRun(runID)
+	if err != nil {
+		t.Fatalf("read agent invocations: %v", err)
+	}
+	return rows
+}
+
+// assertOneCIFixRow checks the run recorded its CI repair as exactly one
+// agent invocation with the purpose ci-fix.
+func assertOneCIFixRow(t *testing.T, h *Harness, runID string) {
+	t.Helper()
+	var purposes []string
+	for _, row := range runAgentInvocations(t, h, runID) {
+		if row.StepName == string(types.StepCI) {
+			purposes = append(purposes, row.Purpose)
+		}
+	}
+	if len(purposes) != 1 || purposes[0] != "ci-fix" {
+		t.Errorf("ci agent_invocations purposes = %q, want exactly one ci-fix", purposes)
+	}
+}
+
+func waitForCompletedRun(t *testing.T, h *Harness, branch string) *ipc.RunInfo {
+	t.Helper()
+	run := h.WaitForRun(branch, 180*time.Second)
+	if run.Status != types.RunCompleted {
+		t.Fatalf("run status = %q, want completed (error: %s)\n%s", run.Status, deref(run.Error), dumpPrompts(h.AgentInvocations()))
+	}
+	return run
+}
+
+// TestAgentModelRoutesNewStepAndFixRoundKeysOnRealBinary drives the real
+// binary through a Gitea-hosted run with intent, pr and ci on one model, test
+// on a second and test-fix on a third: the test fix round takes its own key,
+// the CI repair (no ci-fix key) falls back to ci, and every other step asks
+// for no model.
+func TestAgentModelRoutesNewStepAndFixRoundKeysOnRealBinary(t *testing.T) {
+	h := NewHarness(t, SetupOpts{
+		Agent:    "opencode",
+		Scenario: writeStepAndFixRoundScenario(t),
+		GlobalConfigExtra: "agent_model:\n  opencode:\n" +
+			"    intent: " + routedCheapModel + "\n" +
+			"    pr: " + routedCheapModel + "\n" +
+			"    ci: " + routedCheapModel + "\n" +
+			"    test: " + routedTestOnlyModel + "\n" +
+			"    test-fix: " + routedTestFixModel + "\n",
+		AutoFix: gateAutoFix,
+	})
+	setupGiteaCIRepair(t, h)
+	seedClaudeTranscript(t, h.HomeDir, h.WorkDir, "feature.txt")
+	if out, err := h.RunInDir(h.WorkDir, "init"); err != nil {
+		t.Fatalf("nm init: %v\n%s", err, out)
+	}
+	const branch = "feature/fix-round-routing"
+	h.CommitChange(branch, "feature.txt", "seed for fix-round routing\n", "add feature for fix-round routing")
+	h.PushToGate(branch)
+	run := waitForCompletedRun(t, h, branch)
+
+	turns := map[string]int{}
+	for _, inv := range h.AgentInvocations() {
+		turn := invocationStep(inv)
+		want := ""
+		switch {
+		case turn == "intent", turn == "pr":
+			want = routedCheapModel
+		case turn == "test" && strings.Contains(inv.Prompt, routingTestFixMarker):
+			turn, want = "test-fix", routedTestFixModel
+		case turn == "test":
+			want = routedTestOnlyModel
+		case turn == "ci":
+			if !strings.Contains(inv.Prompt, routingCIFixMarker) {
+				t.Errorf("ci invocation is not the CI repair:\n%s", truncate(inv.Prompt, 400))
+			}
+			want = routedCheapModel
+		case turn == "":
+			t.Fatalf("invocation names no step:\n%s", truncate(inv.Prompt, 400))
+		}
+		if inv.Model != want {
+			t.Errorf("%s invocation asked for model %q, want %q:\n%s", turn, inv.Model, want, truncate(inv.Prompt, 400))
+		}
+		turns[turn]++
+		t.Logf("%-8s asked for model %q", turn, inv.Model)
+	}
+	for turn, min := range map[string]int{"intent": 1, "test": 2, "test-fix": 1, "pr": 1, "ci": 1, "review": 1} {
+		if turns[turn] < min {
+			t.Errorf("%s turns = %d, want at least %d (turns: %v)", turn, turns[turn], min, turns)
+		}
+	}
+	assertOneCIFixRow(t, h, run.ID)
+
+	for step, lines := range map[types.StepName][]string{
+		types.StepIntent: {"using agent_model override for step intent: " + routedCheapModel + " (key intent)"},
+		types.StepPR:     {"using agent_model override for step pr: " + routedCheapModel + " (key pr)"},
+		types.StepCI:     {"using agent_model override for step ci: " + routedCheapModel + " (key ci)"},
+		types.StepTest: {
+			"using agent_model override for step test: " + routedTestOnlyModel + " (key test)",
+			"using agent_model override for step test: " + routedTestFixModel + " (key test-fix)",
+		},
+		types.StepReview: {"no agent_model override configured for step review; running on agent default"},
+	} {
+		log := readRunStepLog(t, h, run.ID, step)
+		for _, want := range lines {
+			if !strings.Contains(log, want) {
+				t.Errorf("%s log is missing %q:\n%s", step, want, log)
+			}
+		}
+	}
+}
+
+// TestAgentModelRoutesCIFixRoundOnRealBinary proves the ci-fix key on the
+// real binary: with both ci and ci-fix set, the CI repair asks for ci-fix's
+// model, says so in ci.log, and records its row with the purpose ci-fix.
+func TestAgentModelRoutesCIFixRoundOnRealBinary(t *testing.T) {
+	h := NewHarness(t, SetupOpts{
+		Agent:    "opencode",
+		Scenario: writeCIFixScenario(t),
+		GlobalConfigExtra: "agent_model:\n  opencode:\n" +
+			"    ci: " + routedCheapModel + "\n" +
+			"    ci-fix: " + routedCIFixModel + "\n",
+		AutoFix: gateAutoFix,
+	})
+	setupGiteaCIRepair(t, h)
+	if out, err := h.Run("init"); err != nil {
+		t.Fatalf("nm init: %v\n%s", err, out)
+	}
+	const branch = "feature/ci-fix-routing"
+	h.CommitChange(branch, "feature.txt", "seed for ci-fix routing\n", "add feature for ci-fix routing")
+	h.PushToGate(branch)
+	run := waitForCompletedRun(t, h, branch)
+
+	repairs := 0
+	for _, inv := range h.AgentInvocations() {
+		if invocationStep(inv) != "ci" {
+			continue
+		}
+		repairs++
+		if inv.Model != routedCIFixModel {
+			t.Errorf("CI repair asked for model %q, want ci-fix's %q", inv.Model, routedCIFixModel)
+		}
+	}
+	if repairs != 1 {
+		t.Fatalf("CI repairs = %d, want 1\n%s", repairs, dumpPrompts(h.AgentInvocations()))
+	}
+	assertOneCIFixRow(t, h, run.ID)
+	const want = "using agent_model override for step ci: " + routedCIFixModel + " (key ci-fix)"
+	if log := readRunStepLog(t, h, run.ID, types.StepCI); !strings.Contains(log, want) {
+		t.Errorf("ci log is missing %q:\n%s", want, log)
 	}
 }

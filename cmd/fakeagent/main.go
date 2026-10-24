@@ -164,9 +164,16 @@ func recordGhStubInvocation(args []string) {
 // this stub's stateless `pulls list` can never re-find the PR it just
 // created), and `pulls <idx>` (view) reports the PR as already merged so the
 // CI step's GetPRState short-circuits on the first poll without needing to
-// model Gitea Actions runs at all.
+// model Gitea Actions runs at all. With FAKEAGENT_TEA_CI_REMOTE set,
+// teaCIStub answers the PR and Actions calls instead, modelling one failing
+// CI run and its repair.
 func runTeaStub(args []string) int {
 	recordTeaStubInvocation(args)
+	if ci, ok := teaCIStubFromEnv(); ok {
+		if code, handled := ci.handle(args, os.Stdout); handled {
+			return code
+		}
+	}
 
 	if len(args) >= 1 && args[0] == "api" && args[len(args)-1] == "/user" {
 		fmt.Println(`{"login":"e2e-tea-user"}`)
