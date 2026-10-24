@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,15 +13,42 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/cli"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/update"
 )
+
+var cleanupOldExecutable = update.CleanupOldExecutable
+var maybeHandleBackgroundCheck = update.MaybeHandleBackgroundCheck
 
 func main() {
 	os.Exit(run())
 }
 
 func run() int {
+	if handled, exitCode, err := shellenv.RunWindowsCooperativeCommandHelper(os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		return exitCode
+	}
+
+	_ = cleanupOldExecutable()
+
+	if root, ok, err := daemonLogSinkRootFromArgs(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	} else if ok {
+		if err := os.Setenv("NM_HOME", root); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if err := daemon.RunBootstrapLogSink(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	if root, ok, err := daemonRunRootFromArgs(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -32,13 +60,13 @@ func run() int {
 			}
 		}
 		if err := daemon.Run(); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			writeDaemonRunError(os.Stderr, err)
 			return 1
 		}
 		return 0
 	}
 
-	if handled, err := update.MaybeHandleBackgroundCheck(os.Args[1:]); handled {
+	if handled, err := maybeHandleBackgroundCheck(os.Args[1:]); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
@@ -59,6 +87,30 @@ func run() int {
 	}()
 
 	return cli.Execute()
+}
+
+func writeDaemonRunError(stderr *os.File, err error) {
+	if errors.Is(err, daemon.ErrSingletonLockHeld) {
+		p, pathErr := paths.New()
+		if pathErr == nil {
+			stderrInfo, stderrErr := stderr.Stat()
+			bootstrapInfo, bootstrapErr := os.Stat(p.DaemonBootstrapLog())
+			if stderrErr == nil && bootstrapErr == nil && os.SameFile(stderrInfo, bootstrapInfo) {
+				return
+			}
+		}
+	}
+	fmt.Fprintln(stderr, err)
+}
+
+func daemonLogSinkRootFromArgs(args []string) (string, bool, error) {
+	if len(args) != 4 || args[0] != "daemon" || args[1] != "log-sink" || args[2] != "--root" {
+		return "", false, nil
+	}
+	if args[3] == "" {
+		return "", false, fmt.Errorf("empty value for --root")
+	}
+	return args[3], true, nil
 }
 
 func daemonRunRootFromArgs(args []string) (string, bool, error) {

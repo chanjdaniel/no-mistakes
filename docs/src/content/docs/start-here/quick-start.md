@@ -24,11 +24,10 @@ no-mistakes doctor
 You need:
 
 - `git`
-- One supported agent binary (`claude`, `codex`, `acli` for Rovo Dev, `opencode`, `pi`, or `copilot`), or a separately installed `acpx` binary for `agent: acp:<target>`
-- For PRs and CI: `gh` (GitHub), `glab` (GitLab), Bitbucket Cloud credentials, or `az` with the `azure-devops` extension (Azure DevOps)
+- One supported agent runner (`claude`, `codex`, `grok`, `acli` for Rovo Dev, `opencode`, `pi`, `copilot`, or `agy` for Antigravity), or a configured Cursor, Devin, or other ACP runner such as `agent: cursor` or `agent: devin`; see [Global Config](/no-mistakes/reference/global-config/) for ACP requirements
+- For PRs and CI: `gh` (GitHub), `glab` (GitLab), `forgejo-axi` (Forgejo), Bitbucket Cloud credentials, `az` with the `azure-devops` extension (Azure DevOps), or `tea` (Gitea)
 
 `no-mistakes doctor` reports whether the configured global runner can start a validation gate.
-For `agent: acp:<target>`, it verifies that `acpx` or `acpx_path` resolves, but does not invoke the target or test its credentials.
 Every validation gate requires a runnable pipeline agent and otherwise fails before its first pipeline step.
 
 See [Provider Integration](/no-mistakes/guides/provider-integration/) for PR/CI setup.
@@ -41,7 +40,7 @@ Navigate to any git repo with an `origin` remote:
 no-mistakes init
 ```
 
-This creates or refreshes a local bare repo at `~/.no-mistakes/repos/<id>.git`, installs a post-receive hook, best-effort isolates the gate's hooks path from shared local Git config writes when Git supports `config --worktree`, adds or repairs a `no-mistakes` git remote in your working repo, installs the `/no-mistakes` agent skill, and ensures the daemon is running.
+This creates or refreshes a local bare repo at `~/.no-mistakes/repos/<id>.git`, installs managed pre- and post-receive hooks, best-effort isolates the gate's hooks path from shared local Git config writes when Git supports `config --worktree`, adds or repairs a `no-mistakes` git remote in your working repo, installs the `/no-mistakes` agent skill, and ensures the daemon is running.
 
 For GitHub fork contributions, keep `origin` pointed at the parent repository and pass your fork as the push target:
 
@@ -50,6 +49,8 @@ no-mistakes init --fork-url git@github.com:you/my-repo.git
 ```
 
 The gate will push validated branches to the fork while opening PRs against the parent.
+
+If you instead cloned your own fork directly (`origin` is your fork, with an `upstream` remote for the parent), plain `init` detects that layout and refuses with the same `--fork-url` guidance instead of silently opening PRs inside your fork.
 
 ```
 $ no-mistakes init

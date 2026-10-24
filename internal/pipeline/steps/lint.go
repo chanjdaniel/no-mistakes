@@ -2,6 +2,7 @@ package steps
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -15,11 +16,15 @@ type LintStep struct{}
 func (s *LintStep) Name() types.StepName { return types.StepLint }
 
 func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+		return nil, err
+	}
 	ctx := sctx.Ctx
-	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	if err != nil {
+		return nil, err
+	}
 	lintCmd := sctx.Config.Commands.Lint
-	model := lookupAgentModel(sctx.Config, string(types.StepLint))
-	logStepModel(sctx, types.StepLint, model)
 
 	if lintCmd == "" {
 		// The combined document+lint housekeeping pass already performed the
@@ -33,7 +38,7 @@ func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 			}
 		}
 		sctx.Log("no lint command configured, asking agent to lint and fix...")
-		reassessHistory := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
+		reassessHistory := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
 		prompt := fmt.Sprintf(
 			`Detect the linting and formatting tools for this project, run the relevant checks yourself, apply safe fixes, and verify the result.
 
@@ -67,9 +72,8 @@ Rules:
 Previous lint findings to address:
 ` + sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
 		}
-		result, err := sctx.Agent.Run(ctx, agent.RunOpts{
-			Model:      model,
-			Prompt:     prompt,
+		result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
+			Prompt:     fixerPrompt(prompt),
 			CWD:        sctx.WorkDir,
 			JSONSchema: findingsSchema,
 			OnChunk:    sctx.LogChunk,
@@ -80,17 +84,21 @@ Previous lint findings to address:
 		}
 
 		var findings Findings
-		if result.Output != nil {
-			if err := json.Unmarshal(result.Output, &findings); err != nil {
-				sctx.Log("could not parse structured output, using text response")
-				findings = Findings{Summary: result.Text}
-			}
+		if result.Output == nil {
+			return nil, errors.New("lint analyzer returned no structured findings")
+		}
+		if err := unmarshalRequiredFindings(result.Output, &findings, true); err != nil {
+			return nil, fmt.Errorf("validate lint analyzer findings: %w", err)
 		}
 		summary, err := extractCommitSummary(result)
 		if err != nil {
+			if errors.Is(err, errRejectedCommitSummary) {
+				return nil, fmt.Errorf("validate lint summary: %w", err)
+			}
 			sctx.Log(fmt.Sprintf("warning: could not parse lint summary: %v", err))
 		}
-		if err := commitAgentFixes(sctx, s.Name(), summary, "fix lint issues"); err != nil {
+		committed, err := commitAgentFixesWithResult(sctx, s.Name(), summary, "fix lint issues")
+		if err != nil {
 			return nil, err
 		}
 
@@ -100,14 +108,14 @@ Previous lint findings to address:
 			NeedsApproval: needsApproval,
 			AutoFixable:   false,
 			Findings:      string(findingsJSON),
-			FixSummary:    summary,
+			FixSummary:    fixResultSummary(committed),
 		}, nil
 	}
 
 	// In fix mode, ask agent to fix lint issues first
 	var fixSummary string
 	if sctx.Fixing {
-		historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
+		historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
 		fixPrompt := fmt.Sprintf(
 			`Fix the lint issues in this repository. Run the linter, identify all issues, and fix them.
 
@@ -140,7 +148,6 @@ Previous lint findings to address:
 			Prompt:          fixPrompt,
 			ErrorPrefix:     "agent fix lint",
 			FallbackSummary: "fix lint issues",
-			Model:           model,
 		})
 		if err != nil {
 			return nil, err
@@ -148,14 +155,18 @@ Previous lint findings to address:
 		fixSummary = summary
 	}
 
-	// Run configured lint command
+	// Run configured lint command after the run-scoped dependency preparation.
+	if err := ensurePrepared(sctx, s.Name()); err != nil {
+		return nil, fmt.Errorf("prepare lint dependencies: %w", err)
+	}
 	sctx.Log(fmt.Sprintf("running linter: %s", lintCmd))
 	output, exitCode, err := runStepShellCommand(sctx, lintCmd)
 	if err != nil {
+		logConfiguredCommandOutput(sctx, output, types.StepLint)
 		return nil, fmt.Errorf("run lint command: %w", err)
 	}
 
-	sctx.Log(output)
+	projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepLint)
 
 	if exitCode != 0 {
 		findings := Findings{
@@ -163,7 +174,7 @@ Previous lint findings to address:
 				Severity:    "warning",
 				Description: fmt.Sprintf("linter found issues (exit code %d)", exitCode),
 			}},
-			Summary: output,
+			Summary: projectedOutput,
 		}
 		findingsJSON, _ := json.Marshal(findings)
 		return &pipeline.StepOutcome{
@@ -186,11 +197,7 @@ Previous lint findings to address:
 func lintOutcomeFromHousekeeping(sctx *pipeline.StepContext, stash pipeline.HousekeepingLintResult) (*pipeline.StepOutcome, error) {
 	findings, err := types.ParseFindingsJSON(stash.FindingsJSON)
 	if err != nil {
-		// A malformed stash means the combined result cannot be trusted;
-		// this should be unreachable (the document step marshalled it), but
-		// fail safe by parking for a human rather than passing silently.
-		sctx.Log("could not parse combined housekeeping lint result, requiring approval")
-		return documentApprovalOutcome("combined housekeeping lint result unreadable"), nil
+		return nil, fmt.Errorf("validate combined housekeeping lint result: %w", err)
 	}
 	sctx.Log(fmt.Sprintf("lint assessed in the combined document+lint housekeeping pass: %d unresolved items", len(findings.Items)))
 	return &pipeline.StepOutcome{

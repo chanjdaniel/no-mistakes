@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 )
 
-func (a *opencodeAgent) ensureServer(ctx context.Context, cwd string) (string, error) {
+func (a *opencodeAgent) ensureServer(ctx context.Context, cwd string, env []string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.server != nil {
@@ -21,7 +23,7 @@ func (a *opencodeAgent) ensureServer(ctx context.Context, cwd string) (string, e
 		return "", fmt.Errorf("opencode port: %w", err)
 	}
 	args := buildOpencodeServeArgs(a.extraArgs, port)
-	srv, err := startServerWithPort(ctx, "opencode", a.bin, args, cwd, "/global/health", port)
+	srv, err := startServerWithPort(ctx, "opencode", a.bin, args, cwd, "/global/health", port, a.overlay(), env)
 	if err != nil {
 		return "", fmt.Errorf("opencode server: %w", err)
 	}
@@ -81,53 +83,8 @@ func (a *opencodeAgent) connectEventStream(ctx context.Context, baseURL string) 
 	return resp.Body, nil
 }
 
-// parseModelString splits a "provider/model" string into providerID and
-// modelID. An empty string is valid (no override). A string without a "/"
-// is rejected because both provider and model must be specified per
-// opencode's API schema.
-func parseModelString(model string) (providerID, modelID string, err error) {
-	if model == "" {
-		return "", "", nil
-	}
-	idx := strings.Index(model, "/")
-	if idx < 0 {
-		return "", "", fmt.Errorf("model must be in 'provider/model' format, got %q", model)
-	}
-	providerID = model[:idx]
-	modelID = model[idx+1:]
-	if providerID == "" || modelID == "" {
-		return "", "", fmt.Errorf("model must be in 'provider/model' format with both parts non-empty, got %q", model)
-	}
-	return providerID, modelID, nil
-}
-
-func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, prompt string, schema json.RawMessage, model string) (*opencodeMessageResponse, error) {
-	body := map[string]any{
-		"parts": []map[string]string{{"type": "text", "text": prompt}},
-	}
-
-	// model at the root: opencode expects {providerID, modelID}, not a
-	// plain string. The lookupAgentModel helpers pass the full
-	// "provider/model" string; parse it into the object opencode expects.
-	if model != "" {
-		providerID, modelID, err := parseModelString(model)
-		if err != nil {
-			return nil, err
-		}
-		body["model"] = map[string]string{
-			"providerID": providerID,
-			"modelID":    modelID,
-		}
-	}
-
-	// Structured output (json_schema) is handled via the prompt text
-	// (buildOpencodePrompt appends schema instructions). We do not send
-	// a root-level "format" key here because it enables server-side
-	// structured-output enforcement (tool_choice), which the DeepSeek
-	// API rejects with "Thinking mode does not support this tool_choice".
-	// Prompt-based schema instructions work across all providers.
-
-	respBytes, err := doJSON(ctx, http.MethodPost, baseURL+"/session/"+sessionID+"/message", nil, body)
+func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, prompt string, schema json.RawMessage) (*opencodeMessageResponse, error) {
+	respBytes, err := doJSON(ctx, http.MethodPost, baseURL+"/session/"+sessionID+"/message", nil, a.messageBody(prompt, schema))
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +94,37 @@ func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, pro
 		return nil, fmt.Errorf("opencode message parse: %w", err)
 	}
 	return &resp, nil
+}
+
+// messageBody builds the POST /session/{id}/message payload.
+//
+// Model and reasoning effort ride the body rather than argv because `opencode
+// serve` has no flag for either: it exits with usage on an unknown option, so an
+// argv-based pin would take the whole server down instead of tuning it. The
+// provider/model split is validated at construction by agentcfg, so a non-empty
+// model always yields the two fields opencode requires; opencode calls reasoning
+// effort a provider-specific "variant".
+func (a *opencodeAgent) messageBody(prompt string, schema json.RawMessage) map[string]any {
+	body := map[string]any{
+		"role":  "user",
+		"parts": []map[string]string{{"type": "text", "text": prompt}},
+	}
+	if provider, modelID, ok := agentcfg.SplitProviderModel(a.profile.Model); ok {
+		body["model"] = map[string]string{"providerID": provider, "modelID": modelID}
+	}
+	if a.profile.Effort != "" {
+		body["variant"] = string(a.profile.Effort)
+	}
+	if len(schema) > 0 {
+		body["info"] = map[string]any{
+			"format": map[string]any{
+				"type":       "json_schema",
+				"schema":     json.RawMessage(schema),
+				"retryCount": 2,
+			},
+		}
+	}
+	return body
 }
 
 func (a *opencodeAgent) abortSession(baseURL, sessionID string) {

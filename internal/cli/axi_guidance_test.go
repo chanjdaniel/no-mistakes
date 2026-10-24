@@ -10,6 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
+	"github.com/kunchenguid/no-mistakes/internal/gateguidance"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/skill"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -18,19 +21,35 @@ import (
 // canonicalStaleMonitorPhrases are the load-bearing claims of the corrected
 // "PR fell behind / conflicted after checks pass" guidance: the live CI monitor
 // auto-rebases and re-pushes such a PR, so the agent runs no command and never
-// hand-rebases, and `no-mistakes rerun` is only the dead-monitor recovery.
+// hand-rebases, and `no-mistakes rerun` is only the dead-monitor recovery,
+// subject to its clean caller-head check.
 var canonicalStaleMonitorPhrases = []string{
 	"never hand-rebase",
+	"revalidates from Review",
+	"cannot prove continuity with the reviewed head",
 	"re-pushes",
 	"no-mistakes rerun",
 }
 
-var canonicalPreserveGateFixPhrases = []string{
-	"no-mistakes axi run --intent",
-	"Never abort-and-restart",
-	"prior gate-fix commits",
-	"already-resolved findings do not re-surface",
+var canonicalRerunRecoveryPhrases = []string{
+	"known clean caller",
+	"selected",
+	"refuses",
+	"no-mistakes axi status",
+	"next_action.command",
+	"no-mistakes axi run",
+	"custody",
 }
+
+var canonicalPreserveGateFixPhrases = []string{
+	"post-pipeline",
+	"on top",
+	"every pipeline fix commit",
+}
+
+const canonicalPipelineAgentPrerequisite = "a supported native agent binary, the `agent: cursor` or `agent: devin` ACP alias, or an explicit `acp:<target>` through `acpx`"
+
+const canonicalUnknownBranchRunRelationship = "An explicit `--run <id>` rendered under `run:` while the current branch is unknown (detached `HEAD` or a branch-lookup failure) encodes no branch relationship."
 
 // TestStaleMonitorGuidance_SyncedAcrossSurfaces guards the repo invariant that
 // agent-driving guidance stays in sync across its three surfaces: the skill
@@ -55,6 +74,22 @@ func TestStaleMonitorGuidance_SyncedAcrossSurfaces(t *testing.T) {
 	for name, content := range surfaces {
 		if strings.Contains(content, "rebase step integrates the latest") {
 			t.Errorf("%s still carries the discarded 'rebase step integrates the latest default branch' wording", name)
+		}
+	}
+
+	// Detailed rerun conditions belong to the skill and live guidance; the
+	// agents guide links to the CLI reference instead of duplicating them.
+	for name, content := range map[string]string{
+		"skill body":      skill.Markdown(),
+		"axi help string": staleMonitorGuidance,
+		"human recovery summary": humanSyncSummary(branchsync.State{
+			State: branchsync.StatePipelineOwned, Safety: "blocked_pipeline_owned_recoverable",
+		}),
+	} {
+		for _, phrase := range canonicalRerunRecoveryPhrases {
+			if !strings.Contains(content, phrase) {
+				t.Errorf("%s is missing rerun recovery guidance %q", name, phrase)
+			}
 		}
 	}
 }
@@ -82,7 +117,7 @@ func TestStaleMonitorGuidance_InChecksPassedOutput(t *testing.T) {
 	}
 
 	got := out.String()
-	for _, phrase := range canonicalStaleMonitorPhrases {
+	for _, phrase := range append(canonicalStaleMonitorPhrases, canonicalRerunRecoveryPhrases...) {
 		if !strings.Contains(got, phrase) {
 			t.Errorf("checks-passed output missing stale-monitor guidance phrase %q in:\n%s", phrase, got)
 		}
@@ -103,6 +138,85 @@ func TestPreserveGateFixGuidance_SyncedAcrossSurfaces(t *testing.T) {
 				t.Errorf("%s is missing the canonical preserve-gate-fix guidance phrase %q", name, phrase)
 			}
 		}
+	}
+}
+
+func TestBranchSyncGuidance_EmittedForBoundArchiveRecovery(t *testing.T) {
+	f := newCLIDivergentArchiveFixture(t)
+	if out, err := executeCmd("axi", "sync", "--bind-archive-ref", f.archiveRef); err != nil {
+		t.Fatalf("bind archive: %v\n%s", err, out)
+	}
+
+	out, err := executeCmd("axi")
+	if err != nil {
+		t.Fatalf("axi home: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"branch_sync:",
+		"code: recover_custody",
+		"command: no-mistakes axi sync --recover --keep-local",
+		"bound archive preserves a divergent later head",
+		"custody returns at the reported required head",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("axi home missing recovery guidance %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestPipelineAgentPrerequisiteGuidance_SyncedAcrossSurfaces(t *testing.T) {
+	surfaces := map[string]string{
+		"skill body":   skill.Markdown(),
+		"agents guide": readAgentsGuide(t),
+		"axi run help": newAxiRunCmd().Long,
+	}
+	for name, content := range surfaces {
+		normalized := strings.Join(strings.Fields(content), " ")
+		if !strings.Contains(normalized, canonicalPipelineAgentPrerequisite) {
+			t.Errorf("%s is missing the canonical pipeline-agent prerequisite %q", name, canonicalPipelineAgentPrerequisite)
+		}
+	}
+}
+
+func TestAxiStatusUnknownBranchRunRelationshipGuidance_InInstalledSkill(t *testing.T) {
+	if !strings.Contains(skill.Markdown(), canonicalUnknownBranchRunRelationship) {
+		t.Error("installed skill is missing the explicit-run unknown-branch relationship contract")
+	}
+}
+
+func TestGateStepBoundaryGuidance_SyncedAcrossSurfaces(t *testing.T) {
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	_ = emitGateContextRefusal(cmd, gatecontext.Result{Nested: true, RunID: "run-1", Phase: types.StepDocument})
+	surfaces := map[string]string{
+		"prompt boundary": gateguidance.PromptBoundary("document"),
+		"skill body":      skill.Markdown(),
+		"agents guide":    readAgentsGuide(t),
+		"live refusal":    out.String(),
+	}
+	phrases := []string{"assigned phase", "outer executor", "push", "PR", "CI"}
+	for name, content := range surfaces {
+		for _, phrase := range phrases {
+			if !strings.Contains(content, phrase) {
+				t.Errorf("%s is missing gate-step boundary phrase %q", name, phrase)
+			}
+		}
+	}
+	for _, name := range []string{"skill body", "agents guide", "live refusal"} {
+		if !strings.Contains(surfaces[name], "nested_gate_context") {
+			t.Errorf("%s is missing structured nested-context error code", name)
+		}
+	}
+}
+
+func TestNormalDriveOutputDoesNotFloodBranchSyncGuidance(t *testing.T) {
+	got := renderDriveResultForGuidanceTest(t, true, types.RunRunning)
+	// Stale-monitor recovery help may name custody actions for a future head
+	// mismatch; ordinary runs still must not emit unrelated sync guidance.
+	withoutMonitorHelp := strings.ReplaceAll(got, staleMonitorGuidance, "")
+	if strings.Contains(got, branchSyncAgentGuidance) || strings.Contains(withoutMonitorHelp, "branch_sync.next_action") {
+		t.Fatalf("ordinary drive output included irrelevant branch-sync guidance:\n%s", got)
 	}
 }
 

@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -49,6 +51,7 @@ type Host struct {
 	org          string // organization URL, e.g. https://dev.azure.com/myorg
 	project      string // project name (may contain spaces)
 	repo         string // repository name
+	draft        bool   // open created PRs as drafts (az repos pr create --draft true)
 }
 
 // New builds a Host. cliAvailable reports whether the az binary is resolvable
@@ -65,6 +68,14 @@ func New(cmd CmdFactory, cliAvailable func() bool, org, project, repo string) *H
 		project:      strings.TrimSpace(project),
 		repo:         strings.TrimSpace(repo),
 	}
+}
+
+// NewWithDraft builds a Host that opens created PRs as drafts when draft is
+// true (az repos pr create --draft true). See New for the other parameters.
+func NewWithDraft(cmd CmdFactory, cliAvailable func() bool, org, project, repo string, draft bool) *Host {
+	h := New(cmd, cliAvailable, org, project, repo)
+	h.draft = draft
+	return h
 }
 
 func (h *Host) Provider() scm.Provider { return scm.ProviderAzureDevOps }
@@ -130,29 +141,173 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 	if err != nil {
 		return nil, fmt.Errorf("az repos pr list: %w", err)
 	}
-	if len(bytes.TrimSpace(out)) == 0 {
-		return nil, nil
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 {
+		return nil, errors.New("az repos pr list: parse response: expected array")
 	}
 	var prs []azPR
-	if err := json.Unmarshal(out, &prs); err != nil {
+	if err := json.Unmarshal(trimmed, &prs); err != nil {
 		return nil, fmt.Errorf("az repos pr list: parse response: %w", err)
+	}
+	if prs == nil {
+		return nil, errors.New("az repos pr list: parse response: expected array")
 	}
 	if len(prs) == 0 {
 		return nil, nil
 	}
+	for i, candidate := range prs {
+		if err := h.validateListedPR(candidate); err != nil {
+			return nil, fmt.Errorf("az repos pr list: parse response: entry %d: %w", i, err)
+		}
+	}
 	return h.toPR(&prs[0]), nil
 }
 
-func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PRContent) (*scm.PR, error) {
-	args := []string{"repos", "pr", "create",
-		"--source-branch", branch,
-		"--target-branch", base,
-		"--title", content.Title,
-		"--description", clampDescription(content.Body),
+func (h *Host) validateListedPR(candidate azPR) error {
+	if candidate.PullRequestID <= 0 {
+		return errors.New("missing positive pullRequestId")
 	}
-	args = append(args, h.scopeArgs()...)
-	args = append(args, "--output", "json")
-	out, err := outputJSON(h.cmd(ctx, "az", args...))
+	// az repos pr list often omits repository.webUrl (null in list payloads;
+	// the show endpoint supplies it). Organization is already pinned by the
+	// list command's --organization flag, so a missing URL is identified by
+	// repository.name and repository.project.name instead of a second show
+	// call. A nonempty URL is still parsed and must match; names never
+	// rescue a malformed URL.
+	if candidate.Repository.WebURL != "" {
+		org, project, repo, err := parseRepositoryWebURL(candidate.Repository.WebURL)
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(azureOrganizationName(org), azureOrganizationName(h.org)) {
+			return fmt.Errorf("repository organization %q does not match configured organization %q", org, h.org)
+		}
+		if !strings.EqualFold(project, h.project) {
+			return fmt.Errorf("repository project %q does not match configured project %q", project, h.project)
+		}
+		if !strings.EqualFold(repo, h.repo) {
+			return fmt.Errorf("repository name %q does not match configured repository %q", repo, h.repo)
+		}
+		if name := strings.TrimSpace(candidate.Repository.Name); name != "" && !strings.EqualFold(name, h.repo) {
+			return fmt.Errorf("repository metadata name %q does not match configured repository %q", name, h.repo)
+		}
+		if name := strings.TrimSpace(candidate.Repository.Project.Name); name != "" && !strings.EqualFold(name, h.project) {
+			return fmt.Errorf("repository metadata project %q does not match configured project %q", name, h.project)
+		}
+		return nil
+	}
+	repo := strings.TrimSpace(candidate.Repository.Name)
+	if repo == "" {
+		return errors.New("missing repository.name")
+	}
+	if !strings.EqualFold(repo, h.repo) {
+		return fmt.Errorf("repository metadata name %q does not match configured repository %q", repo, h.repo)
+	}
+	project := strings.TrimSpace(candidate.Repository.Project.Name)
+	if project == "" {
+		return errors.New("missing repository.project.name")
+	}
+	if !strings.EqualFold(project, h.project) {
+		return fmt.Errorf("repository metadata project %q does not match configured project %q", project, h.project)
+	}
+	return nil
+}
+
+func parseRepositoryWebURL(raw string) (string, string, string, error) {
+	trimmed := strings.TrimSpace(raw)
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", "", "", errors.New("missing valid repository.webUrl")
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return "", "", "", errors.New("repository.webUrl must be HTTP")
+	}
+	if parsed.ForceQuery || parsed.RawQuery != "" || strings.Contains(trimmed, "#") {
+		return "", "", "", errors.New("repository.webUrl must not contain query or fragment")
+	}
+	segments := splitDecodePath(parsed.EscapedPath())
+	gitIndex := -1
+	for i, segment := range segments {
+		if segment == "_git" {
+			gitIndex = i
+			break
+		}
+	}
+	if gitIndex < 1 || gitIndex+2 != len(segments) {
+		return "", "", "", errors.New("repository.webUrl must end at the repository path")
+	}
+	org, project, repo, ok := ParseRemote(trimmed)
+	if !ok {
+		return "", "", "", errors.New("missing valid repository.webUrl")
+	}
+	return org, project, repo, nil
+}
+
+func azureOrganizationName(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "dev.azure.com" {
+		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+		if len(parts) > 0 {
+			return parts[0]
+		}
+	}
+	return strings.TrimSuffix(host, ".visualstudio.com")
+}
+
+// runWithDescription runs an az PR command whose description is supplied
+// out-of-band through a temp file referenced as `--description @<file>`, and
+// returns the command's JSON stdout. buildArgs receives the `@<file>` token and
+// returns the full az argv, placing that token where --description's value
+// belongs. The (clamped) body is written to the file before the command runs
+// and the file is always removed afterward.
+//
+// Why a file instead of passing the body inline as `--description <body>`: on
+// Windows the az CLI is a batch shim (az.cmd) that Go executes through cmd.exe.
+// cmd.exe terminates each argument at the first newline, so a multi-line body
+// was truncated to just its first line (e.g. "## Intent"), silently dropping the
+// rest of the PR description - a Windows-only data loss (#501). A file path is a
+// single newline-free token that survives cmd.exe intact, and az reads the
+// description from the file via the "@" convention (see `az repos pr create
+// --help`). The file form additionally sidesteps Python argparse misreading body
+// lines that begin with "-"/"--"/"---" (markdown horizontal rules, diff
+// "--- a/file" hunks) as new options, which a naive per-line split would break on.
+//
+// The body is clamped to Azure DevOps' description cap before it is written, so
+// az never sees an over-length description no matter how the body was produced.
+func (h *Host) runWithDescription(ctx context.Context, body string, buildArgs func(descArg string) []string) ([]byte, error) {
+	f, err := os.CreateTemp("", "nm-pr-desc-*.md")
+	if err != nil {
+		return nil, fmt.Errorf("create PR description temp file: %w", err)
+	}
+	path := f.Name()
+	defer os.Remove(path)
+	if _, err := f.WriteString(clampDescription(body)); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("write PR description temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("close PR description temp file: %w", err)
+	}
+	return outputJSON(h.cmd(ctx, "az", buildArgs("@"+path)...))
+}
+
+func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PRContent) (*scm.PR, error) {
+	out, err := h.runWithDescription(ctx, content.Body, func(descArg string) []string {
+		args := []string{"repos", "pr", "create",
+			"--source-branch", branch,
+			"--target-branch", base,
+			"--title", content.Title,
+			"--description", descArg,
+		}
+		if h.draft {
+			args = append(args, "--draft", "true")
+		}
+		args = append(args, h.scopeArgs()...)
+		return append(args, "--output", "json")
+	})
 	if err != nil {
 		return nil, fmt.Errorf("az repos pr create: %w", err)
 	}
@@ -168,13 +323,14 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	if id == "" {
 		return nil, errors.New("az repos pr update: missing PR id")
 	}
-	args := []string{"repos", "pr", "update", "--id", id,
-		"--title", content.Title,
-		"--description", clampDescription(content.Body),
-	}
-	args = append(args, h.orgArgs()...)
-	args = append(args, "--output", "json")
-	if _, err := outputJSON(h.cmd(ctx, "az", args...)); err != nil {
+	if _, err := h.runWithDescription(ctx, content.Body, func(descArg string) []string {
+		args := []string{"repos", "pr", "update", "--id", id, "--description", descArg}
+		if content.Title != "" {
+			args = append(args, "--title", content.Title)
+		}
+		args = append(args, h.orgArgs()...)
+		return append(args, "--output", "json")
+	}); err != nil {
 		return nil, fmt.Errorf("az repos pr update: %w", err)
 	}
 	return pr, nil
@@ -212,8 +368,13 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 		if bucket == "" {
 			continue
 		}
+		providerID := ""
+		if id := strings.TrimSpace(e.EvaluationID); id != "" {
+			providerID = "azure-policy-evaluation:" + id
+		}
 		checks = append(checks, scm.Check{
 			Name:        e.checkName(),
+			ProviderID:  providerID,
 			Bucket:      bucket,
 			CompletedAt: parseAzTime(e.CompletedDate),
 		})
@@ -275,7 +436,8 @@ func (h *Host) toPR(raw *azPR) *scm.PR {
 		id = strconv.Itoa(raw.PullRequestID)
 	}
 	return &scm.PR{
-		Number: id,
-		URL:    webPRURL(h.org, h.project, h.repo, raw.Repository.WebURL, id),
+		Number:     id,
+		URL:        webPRURL(h.org, h.project, h.repo, "", id),
+		BaseBranch: strings.TrimPrefix(strings.TrimSpace(raw.TargetRefName), "refs/heads/"),
 	}
 }

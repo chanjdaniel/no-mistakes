@@ -181,7 +181,7 @@ func TestGetActiveRunParams(t *testing.T) {
 }
 
 func TestRerunParams(t *testing.T) {
-	params := RerunParams{RepoID: "repo456", Branch: "feature", SkipSteps: []types.StepName{types.StepReview}}
+	params := RerunParams{RepoID: "repo456", Branch: "feature", PreviousRunID: "run123", SkipSteps: []types.StepName{types.StepReview}}
 	data, _ := json.Marshal(params)
 	var got RerunParams
 	if err := json.Unmarshal(data, &got); err != nil {
@@ -192,6 +192,9 @@ func TestRerunParams(t *testing.T) {
 	}
 	if got.Branch != "feature" {
 		t.Errorf("branch = %q, want %q", got.Branch, "feature")
+	}
+	if got.PreviousRunID != "run123" {
+		t.Errorf("previous_run_id = %q, want %q", got.PreviousRunID, "run123")
 	}
 	if len(got.SkipSteps) != 1 || got.SkipSteps[0] != types.StepReview {
 		t.Errorf("skip_steps = %#v, want review", got.SkipSteps)
@@ -238,16 +241,18 @@ func TestRespondParams(t *testing.T) {
 
 func TestRunInfoRoundTrip(t *testing.T) {
 	prURL := "https://github.com/user/repo/pull/42"
+	submittedHead := "submitted123"
 	info := RunInfo{
-		ID:        "run001",
-		RepoID:    "repo001",
-		Branch:    "feature",
-		HeadSHA:   "abc123",
-		BaseSHA:   "def456",
-		Status:    types.RunRunning,
-		PRURL:     &prURL,
-		CreatedAt: 1700000000,
-		UpdatedAt: 1700000001,
+		ID:               "run001",
+		RepoID:           "repo001",
+		Branch:           "feature",
+		HeadSHA:          "abc123",
+		SubmittedHeadSHA: &submittedHead,
+		BaseSHA:          "def456",
+		Status:           types.RunRunning,
+		PRURL:            &prURL,
+		CreatedAt:        1700000000,
+		UpdatedAt:        1700000001,
 	}
 	data, _ := json.Marshal(info)
 	var got RunInfo
@@ -259,6 +264,12 @@ func TestRunInfoRoundTrip(t *testing.T) {
 	}
 	if got.PRURL == nil || *got.PRURL != prURL {
 		t.Errorf("pr_url = %v, want %q", got.PRURL, prURL)
+	}
+	if got.SubmittedHeadSHA == nil || *got.SubmittedHeadSHA != submittedHead {
+		t.Errorf("submitted_head_sha = %v, want %q", got.SubmittedHeadSHA, submittedHead)
+	}
+	if got.PRBaseBranch != nil {
+		t.Errorf("pr_base_branch = %v, want nil when omitted", got.PRBaseBranch)
 	}
 }
 
@@ -393,6 +404,7 @@ func TestMethodConstants(t *testing.T) {
 	methods := []string{
 		MethodPushReceived,
 		MethodGetRun,
+		MethodGetStepDiff,
 		MethodGetRuns,
 		MethodGetRunsForHead,
 		MethodGetActiveRun,
@@ -400,6 +412,8 @@ func TestMethodConstants(t *testing.T) {
 		MethodSubscribe,
 		MethodRespond,
 		MethodCancelRun,
+		MethodGateContext,
+		MethodAdmitPush,
 		MethodHealth,
 		MethodShutdown,
 	}
@@ -413,8 +427,8 @@ func TestMethodConstants(t *testing.T) {
 		}
 		seen[m] = true
 	}
-	if len(methods) != 11 {
-		t.Errorf("expected 11 methods, got %d", len(methods))
+	if len(methods) != 14 {
+		t.Errorf("expected 14 methods, got %d", len(methods))
 	}
 }
 

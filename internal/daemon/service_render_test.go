@@ -82,6 +82,9 @@ func TestRenderSystemdUnitIncludesManagedPath(t *testing.T) {
 	home := "/home/test"
 
 	unit := renderSystemdUnit("/usr/local/bin/no-mistakes", p, home)
+	if got := systemdSectionValue(unit, "Service", "OOMPolicy"); got != "continue" {
+		t.Fatalf("[Service] OOMPolicy = %q, want continue:\n%s", got, unit)
+	}
 	pathValue := extractSystemdEnvironmentValue(t, unit, "PATH")
 	for _, want := range []string{
 		"/opt/homebrew/bin",
@@ -98,6 +101,26 @@ func TestRenderSystemdUnitIncludesManagedPath(t *testing.T) {
 	}
 	if pathValue == "" {
 		t.Fatalf("expected Environment=PATH=... in systemd unit, got:\n%s", unit)
+	}
+}
+
+func TestManagedServicesRouteRawOutputToBootstrapSink(t *testing.T) {
+	t.Parallel()
+	p := paths.WithRoot(filepath.Join(t.TempDir(), "nm home"))
+
+	plist := renderLaunchAgent("/opt/no-mistakes/bin/no-mistakes", p, "/Users/test")
+	for _, key := range []string{"StandardOutPath", "StandardErrorPath"} {
+		if got := extractPlistValue(t, plist, key); got != p.DaemonBootstrapLog() {
+			t.Errorf("launchd %s = %q, want %q", key, got, p.DaemonBootstrapLog())
+		}
+	}
+
+	unit := renderSystemdUnit("/usr/local/bin/no-mistakes", p, "/home/test")
+	want := "append:" + p.DaemonBootstrapLog()
+	for _, directive := range []string{"StandardOutput=" + strconv.Quote(want), "StandardError=" + strconv.Quote(want)} {
+		if !strings.Contains(unit, directive) {
+			t.Errorf("systemd unit missing %q:\n%s", directive, unit)
+		}
 	}
 }
 
@@ -144,6 +167,24 @@ func extractSystemdEnvironmentValue(t *testing.T, unit, key string) string {
 		}
 		if strings.HasPrefix(entry, envPrefix) {
 			return strings.TrimPrefix(entry, envPrefix)
+		}
+	}
+	return ""
+}
+
+func systemdSectionValue(unit, section, key string) string {
+	current := ""
+	for _, line := range strings.Split(unit, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			current = strings.Trim(line, "[]")
+			continue
+		}
+		if current != section {
+			continue
+		}
+		if k, v, ok := strings.Cut(line, "="); ok && strings.TrimSpace(k) == key {
+			return strings.TrimSpace(v)
 		}
 	}
 	return ""

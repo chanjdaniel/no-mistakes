@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -104,12 +105,15 @@ func TestExecutor_LogChunkThrottlesStepActivityWrites(t *testing.T) {
 		t.Fatalf("install activity counter: %v", err)
 	}
 
+	var chunkDuration time.Duration
 	step := &adaptiveCallStep{
 		name: types.StepReview,
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			started := time.Now()
 			for i := 0; i < 100; i++ {
 				sctx.LogChunk(fmt.Sprintf("delta-%03d ", i))
 			}
+			chunkDuration = time.Since(started)
 			return &StepOutcome{ExitCode: 0}, nil
 		},
 	}
@@ -123,8 +127,13 @@ func TestExecutor_LogChunkThrottlesStepActivityWrites(t *testing.T) {
 	if err := counterDB.QueryRow(`SELECT n FROM step_activity_update_count`).Scan(&updates); err != nil {
 		t.Fatalf("read activity update count: %v", err)
 	}
-	if updates > 5 {
-		t.Fatalf("step activity updates = %d, want throttled count <= 5", updates)
+	// Start and completion each update activity once. Streaming may update once
+	// immediately and once per complete throttle interval after that; a fixed
+	// count is invalid when race-enabled Windows CI takes several seconds to
+	// write the chunks under filesystem contention.
+	maxUpdates := int(chunkDuration/stepActivityThrottleInterval) + 3
+	if updates > maxUpdates {
+		t.Fatalf("step activity updates = %d over %s, want throttled count <= %d", updates, chunkDuration, maxUpdates)
 	}
 }
 
@@ -344,6 +353,66 @@ func TestExecutor_LogFileWritten_OnStepError(t *testing.T) {
 	}
 }
 
+func TestExecutor_StepErrorRedactsCredentialURL(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	// A step error carrying a credentialled upstream URL (as a real git push
+	// rejection error would). It must be redacted before reaching the step log
+	// file, the DB error column, the returned executor error, and the IPC event.
+	const token = "ghp_secret_DO_NOT_LEAK"
+	credURL := "https://x-access-token:" + token + "@github.com/o/r.git"
+	stepErr := fmt.Errorf("push to upstream: git push %s: remote rejected: file exceeds 100.00 MB", credURL)
+
+	ec := &eventCollector{}
+	exec := NewExecutor(database, p, nil, nil, []Step{newFailStep(types.StepPush, stepErr)}, ec.handler)
+	err := exec.Execute(context.Background(), run, repo, workDir)
+	if err == nil {
+		t.Fatal("expected error from failing step")
+	}
+
+	// 1) Step log file must contain the redacted form, never the token.
+	logPath := filepath.Join(p.RunLogDir(run.ID), "push.log")
+	data, rerr := os.ReadFile(logPath)
+	if rerr != nil {
+		t.Fatalf("expected log file at %s: %v", logPath, rerr)
+	}
+	logContent := string(data)
+	if strings.Contains(logContent, token) {
+		t.Errorf("step log leaked credential: %s", logContent)
+	}
+	if !strings.Contains(logContent, "redacted@github.com/o/r.git") {
+		t.Errorf("step log missing redacted URL, got: %s", logContent)
+	}
+
+	// 2) DB step error column must not carry the token.
+	steps, _ := database.GetStepsByRun(run.ID)
+	if steps[0].Error == nil {
+		t.Fatal("expected step error to be persisted")
+	}
+	dbErr := *steps[0].Error
+	if strings.Contains(dbErr, token) {
+		t.Errorf("DB step error leaked credential: %q", dbErr)
+	}
+	if !strings.Contains(dbErr, "redacted@github.com/o/r.git") {
+		t.Errorf("DB step error missing redacted URL, got: %q", dbErr)
+	}
+
+	// 3) Returned executor error must not carry the token.
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("returned error leaked credential: %q", err.Error())
+	}
+
+	// 4) IPC step-completed event error must not carry the token.
+	ev := ec.find(ipc.EventStepCompleted, types.StepPush)
+	if ev == nil {
+		t.Fatal("expected step completed event")
+	}
+	if ev.Error != nil && strings.Contains(*ev.Error, token) {
+		t.Errorf("IPC event error leaked credential: %q", *ev.Error)
+	}
+}
+
 func TestExecutor_LogFileMultipleSteps(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
@@ -387,4 +456,90 @@ func TestExecutor_LogFileMultipleSteps(t *testing.T) {
 	if strings.Contains(string(reviewLog), "test message") {
 		t.Error("review log should not contain test message")
 	}
+}
+
+// TestExecutor_SubprocessLivenessUpdatesActivityWithoutFloodingTheStepLog pins
+// how the executor consumes an agent's subprocess-liveness signal.
+//
+// The signal has to reach step activity, because that is the only thing that
+// tells `axi status` a long tool-using fix round is alive rather than wedged.
+// It must NOT reach the step log: a real turn emits it every few seconds for
+// half an hour, and the step log is what an operator actually reads.
+func TestExecutor_SubprocessLivenessUpdatesActivityWithoutFloodingTheStepLog(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	livenessAgent := &lifecycleEmittingAgent{
+		events: []agent.LifecycleEvent{
+			{Agent: "pi", Phase: agent.LifecyclePhaseStart, PID: 1234, Message: "pi started pid=1234"},
+			{Agent: "pi", Phase: agent.LifecyclePhaseActivity, Message: "pi producing output"},
+			{Agent: "pi", Phase: agent.LifecyclePhaseActivity, Message: "pi producing output"},
+		},
+	}
+
+	var stepResultID string
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			stepResultID = sctx.StepResultID
+			if _, err := sctx.RunAgent(agent.RunOpts{Prompt: "review"}); err != nil {
+				t.Fatalf("run agent: %v", err)
+			}
+			got, err := database.GetStepResult(sctx.StepResultID)
+			if err != nil {
+				t.Fatalf("get step result: %v", err)
+			}
+			if got.LastActivity == nil || !strings.Contains(*got.LastActivity, "producing output") {
+				var activity string
+				if got.LastActivity != nil {
+					activity = *got.LastActivity
+				}
+				t.Fatalf("last_activity = %q, want the subprocess liveness signal recorded", activity)
+			}
+			return &StepOutcome{ExitCode: 0}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, livenessAgent, []Step{step}, nil)
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	sr, err := database.GetStepResult(stepResultID)
+	if err != nil {
+		t.Fatalf("get step result: %v", err)
+	}
+	if sr.LogPath == nil {
+		t.Fatal("expected a step log path")
+	}
+	logBytes, err := os.ReadFile(*sr.LogPath)
+	if err != nil {
+		t.Fatalf("read step log: %v", err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "pi started pid=1234") {
+		t.Fatalf("step log = %q, want the subprocess start still logged", log)
+	}
+	if strings.Contains(log, "producing output") {
+		t.Fatalf("step log = %q, liveness ticks must not be written to the step log", log)
+	}
+}
+
+// lifecycleEmittingAgent replays a fixed lifecycle sequence, standing in for a
+// native adapter without spawning a subprocess.
+type lifecycleEmittingAgent struct {
+	events []agent.LifecycleEvent
+}
+
+func (a *lifecycleEmittingAgent) Name() string { return "pi" }
+
+func (a *lifecycleEmittingAgent) Close() error { return nil }
+
+func (a *lifecycleEmittingAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	for _, event := range a.events {
+		if opts.OnLifecycle != nil {
+			opts.OnLifecycle(event)
+		}
+	}
+	return &agent.Result{Text: "done"}, nil
 }
