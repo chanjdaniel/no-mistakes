@@ -311,6 +311,98 @@ func TestGetChecksDoesNotDuplicateWorkflowRunsRepresentedByRollup(t *testing.T) 
 	}
 }
 
+// An in-progress head workflow run with no check run yet is pending on its own.
+func TestGetChecksReportsInProgressWorkflowRunWithoutCheckRunsAsPending(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
+			stdout: githubCommitChecksResponse(`[
+				{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"}
+			]`),
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":2,"workflow_runs":[
+				{"id":101,"workflow_id":1001,"name":"Lint","status":"completed","conclusion":"success"},
+				{"id":102,"workflow_id":1002,"name":"Test","status":"in_progress","conclusion":null}
+			]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 2 || checks[1].Name != "Test" || checks[1].Bucket != scm.CheckBucketPending {
+		t.Fatalf("checks = %+v, want lint plus the pending Test workflow run", checks)
+	}
+}
+
+// Fork PR #4's race (chanjdaniel/no-mistakes#4): the head's "Test" workflow
+// run had five jobs green in the rollup while its e2e job had not registered a
+// check run yet. The run is represented by those jobs' checks, but while it is
+// unfinished and none of them is pending, the run itself is the only evidence
+// that a job is still to come, so it is reported as a pending check.
+func TestGetChecksKeepsRepresentedInProgressWorkflowRunPending(t *testing.T) {
+	t.Parallel()
+
+	jobs := func(e2e string) string {
+		nodes := `{"__typename":"CheckRun","name":"backend","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/900/job/1"},
+			{"__typename":"CheckRun","name":"frontend-unit","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/900/job/2"}`
+		if e2e != "" {
+			nodes += `,` + e2e
+		}
+		return "[" + nodes + "]"
+	}
+	for _, tc := range []struct {
+		name, e2e, runStatus, runConclusion string
+		want                                []string
+	}{
+		{
+			name: "late job not registered", runStatus: "in_progress", runConclusion: "null",
+			want: []string{"backend/pass", "frontend-unit/pass", "Test/pending"},
+		},
+		{
+			name:      "late job registered and running",
+			e2e:       `{"__typename":"CheckRun","name":"e2e","status":"IN_PROGRESS","conclusion":null,"detailsUrl":"https://github.com/test/repo/actions/runs/900/job/6"}`,
+			runStatus: "in_progress", runConclusion: "null",
+			want: []string{"backend/pass", "frontend-unit/pass", "e2e/pending"},
+		},
+		{
+			name:      "run completed",
+			e2e:       `{"__typename":"CheckRun","name":"e2e","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/900/job/6"}`,
+			runStatus: "completed", runConclusion: `"success"`,
+			want: []string{"backend/pass", "frontend-unit/pass", "e2e/pass"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+				githubCommitChecksCommand("", "test/repo", "deadbeef"):               {stdout: githubCommitChecksResponse(jobs(tc.e2e))},
+				"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+					stdout: fmt.Sprintf(`[{"total_count":1,"workflow_runs":[
+						{"id":900,"workflow_id":1001,"name":"Test","status":%q,"conclusion":%s}
+					]}]`, tc.runStatus, tc.runConclusion) + "\n",
+				},
+			}), nil, "", "test/repo")
+
+			checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+			if err != nil {
+				t.Fatalf("GetChecks() error = %v", err)
+			}
+			got := make([]string, 0, len(checks))
+			for _, check := range checks {
+				got = append(got, check.Name+"/"+string(check.Bucket))
+			}
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Fatalf("checks = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // The raw commit statusCheckRollup keeps every check run a commit ever had,
 // including a same-named run a later run has already superseded (e.g. a CI
 // monitor auto-fix push re-triggering the same gate check). Without a

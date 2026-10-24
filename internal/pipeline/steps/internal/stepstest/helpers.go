@@ -758,6 +758,21 @@ func FakeCIGHSequence(t *testing.T, state string, checks []string) []string {
 	})
 }
 
+// FakeCIGHSequenceWithWorkflowRuns is FakeCIGHSequence with the head commit's
+// workflow runs sequenced too: runs[i] is the JSON run list GitHub reports on
+// the poll that reads checks[i], and the last entry repeats.
+func FakeCIGHSequenceWithWorkflowRuns(t *testing.T, state string, checks, runs []string) []string {
+	t.Helper()
+	if len(runs) != len(checks) {
+		t.Fatalf("workflow run sequence has %d entries, want one per checks entry (%d)", len(runs), len(checks))
+	}
+	runsPath := filepath.Join(t.TempDir(), "workflow-runs.txt")
+	if err := os.WriteFile(runsPath, []byte(strings.Join(runs, "\n")), 0o644); err != nil {
+		t.Fatalf("write workflow run sequence: %v", err)
+	}
+	return append(FakeCIGHSequence(t, state, checks), "FAKE_CLI_WORKFLOW_RUNS_PATH="+runsPath)
+}
+
 // fakeCIGHLoggedSequence is fakeCIGHSequence with a recorded argv log, so tests
 // can assert which gh commands the CI monitor issued (for example whether it
 // asked for a check rerun). mergeable overrides the reported mergeable state

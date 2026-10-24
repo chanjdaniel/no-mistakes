@@ -903,8 +903,31 @@ func printFakeRunJobs() {
 	fmt.Printf("{\"jobs\":%s}\n", raw)
 }
 
+// printFakeWorkflowRuns answers the head commit's workflow-run listing. With
+// FAKE_CLI_WORKFLOW_RUNS_PATH set it reads one JSON list per line and answers
+// the line of the check sequence entry this poll's rollup read just served
+// (the rollup is read first and advances FAKE_CLI_CHECKS_INDEX_PATH), so a
+// sequence test moves a run's status in step with its checks.
 func printFakeWorkflowRuns() {
 	raw := os.Getenv("FAKE_CLI_WORKFLOW_RUNS")
+	if runsPath := os.Getenv("FAKE_CLI_WORKFLOW_RUNS_PATH"); runsPath != "" {
+		data, err := os.ReadFile(runsPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		entries := strings.Split(strings.TrimSpace(string(data)), "\n")
+		index := 0
+		if rawIndex, err := os.ReadFile(os.Getenv("FAKE_CLI_CHECKS_INDEX_PATH")); err == nil {
+			if parsed, err := strconv.Atoi(strings.TrimSpace(string(rawIndex))); err == nil && parsed > 0 {
+				index = parsed - 1
+			}
+		}
+		if index >= len(entries) {
+			index = len(entries) - 1
+		}
+		raw = entries[index]
+	}
 	if raw == "" {
 		raw = "[]"
 	}

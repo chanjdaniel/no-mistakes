@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2858,5 +2859,97 @@ func TestCIStep_HeldWorkflowDoesNotDeferAGenuineFailureBesideIt(t *testing.T) {
 	}
 	if !strings.Contains(joined, cimonitor.ChecksAwaitingApprovalMsg) {
 		t.Errorf("escalation did not name the maintainer-approval hold; logs: %v", logs)
+	}
+}
+
+// TestCIStep_LateRegisteringJobInARunningWorkflowNeverReportsGreen models
+// fork PR #4 (chanjdaniel/no-mistakes#4), observed on PRs 27-30 of
+// MakersMarketManagement: five checks of the head's "Test" workflow run were
+// green while its e2e job had not registered a check run yet, and the CI step
+// logged "all CI checks passed". The run is still in progress on those polls,
+// so the step must stay not-ready until all six checks are green and the run
+// has completed.
+func TestCIStep_LateRegisteringJobInARunningWorkflowNeverReportsGreen(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)
+
+	job := func(id int, name, bucket string) string {
+		return fmt.Sprintf(`{"name":%q,"bucket":%q,"link":"https://github.com/test/repo/actions/runs/900/job/%d"}`, name, bucket, id)
+	}
+	fiveGreen := []string{
+		job(1, "backend", "pass"),
+		job(2, "frontend-unit", "pass"),
+		job(3, "frontend-lint-and-types", "pass"),
+		job(4, "docker-build", "pass"),
+		job(5, "knowledge-graph", "pass"),
+	}
+	checksSequence := []string{
+		"[" + strings.Join(fiveGreen, ",") + "]",
+		"[" + strings.Join(append(append([]string{}, fiveGreen...), job(6, "e2e", "pending")), ",") + "]",
+		"[" + strings.Join(append(append([]string{}, fiveGreen...), job(6, "e2e", "pass")), ",") + "]",
+	}
+	inProgress := `[{"id":900,"workflow_id":1001,"name":"Test","status":"in_progress","conclusion":null,"run_started_at":"2026-07-14T08:00:00Z"}]`
+	completed := `[{"id":900,"workflow_id":1001,"name":"Test","status":"completed","conclusion":"success","run_started_at":"2026-07-14T08:00:00Z","updated_at":"2026-07-14T08:20:00Z"}]`
+	env := stepstest.FakeCIGHSequenceWithWorkflowRuns(t, "OPEN", checksSequence, []string{inProgress, inProgress, completed})
+
+	prURL := "https://github.com/test/repo/pull/27"
+	sctx := stepstest.NewTestContextWithDBRecords(t, &stepstest.MockAgent{AgentName: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = config.CITimeoutUnlimited
+	sctx.Config.AutoFix.CI = 0
+
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+
+	assertNotReady := func(poll int) {
+		t.Helper()
+		if cimonitor.ChecksPassed(logs) {
+			t.Fatalf("poll %d reported checks passed while the head's Test run was in progress; logs: %v", poll, logs)
+		}
+		dbRun, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dbRun.CIReadyAt != nil {
+			t.Fatalf("poll %d persisted CI readiness while the head's Test run was in progress", poll)
+		}
+	}
+	polls := 0
+	step := (&steps.CIStep{}).SetWaitForNextPoll(func(ctx context.Context, interval time.Duration) error {
+		polls++
+		if polls < len(checksSequence) {
+			assertNotReady(polls)
+			return nil
+		}
+		cancel()
+		return ctx.Err()
+	})
+	_, err := step.Execute(sctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected monitoring to continue after green checks, got %v; logs: %v", err, logs)
+	}
+	if polls != len(checksSequence) {
+		t.Fatalf("polls = %d, want %d; logs: %v", polls, len(checksSequence), logs)
+	}
+	passed := 0
+	for _, l := range logs {
+		if strings.Contains(l, cimonitor.ChecksPassedMsg) {
+			passed++
+		}
+	}
+	if passed != 1 {
+		t.Fatalf("checks-passed logged %d times, want once on the last poll; logs: %v", passed, logs)
+	}
+	dbRun, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dbRun.CIReadyAt == nil {
+		t.Fatalf("all six checks green with the run completed must persist CI readiness; logs: %v", logs)
 	}
 }

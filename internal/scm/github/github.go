@@ -663,13 +663,22 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 	for _, run := range runs {
 		runID := h.actionsRunID(run.Link)
 		if indices := represented[runID]; runID != "" && len(indices) > 0 {
+			jobPending := false
 			for _, i := range indices {
 				if checks[i].StartedAt.IsZero() && !run.StartedAt.IsZero() {
 					checks[i].StartedAt = run.StartedAt
 				}
 				checks[i].WorkflowID = run.WorkflowID
+				jobPending = jobPending || checks[i].Bucket == scm.CheckBucketPending
 			}
-			continue
+			// A job registers its check run only once it is queued, so a run
+			// whose registered jobs are all done can still be waiting on a
+			// late job (one behind `needs:`, say). The run's own status is
+			// then the only evidence, and an unfinished run keeps the commit
+			// pending until it completes.
+			if run.Bucket != scm.CheckBucketPending || jobPending {
+				continue
+			}
 		}
 		checks = append(checks, run)
 		if runID != "" {
