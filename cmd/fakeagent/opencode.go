@@ -331,6 +331,11 @@ func (s *fakeOpencodeServer) handleMessage(w http.ResponseWriter, r *http.Reques
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"parts"`
+		Model *struct {
+			ProviderID string `json:"providerID"`
+			ModelID    string `json:"modelID"`
+		} `json:"model"`
+		Variant string `json:"variant"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -342,7 +347,11 @@ func (s *fakeOpencodeServer) handleMessage(w http.ResponseWriter, r *http.Reques
 			prompt += p.Text
 		}
 	}
-	logInvocation("opencode", prompt, []string{"session", sessionID})
+	model := ""
+	if body.Model != nil {
+		model = body.Model.ProviderID + "/" + body.Model.ModelID
+	}
+	writeInvocation(invocation{Agent: "opencode", Args: []string{"session", sessionID}, Prompt: prompt, Model: model, Variant: body.Variant})
 
 	if s.fixture != nil {
 		// Stream the recorded SSE bytes verbatim, then return the

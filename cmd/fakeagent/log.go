@@ -19,21 +19,24 @@ type invocation struct {
 	Args   []string `json:"args"`
 	Prompt string   `json:"prompt"`
 	CWD    string   `json:"cwd,omitempty"`
+	// Model and Variant are what an opencode message body asked for
+	// (provider/model and the effort variant), so an e2e test can assert
+	// per-invocation routing that never appears in argv.
+	Model   string `json:"model,omitempty"`
+	Variant string `json:"variant,omitempty"`
 }
 
 func logInvocation(agent, prompt string, args []string) {
+	writeInvocation(invocation{Agent: agent, Args: args, Prompt: prompt})
+}
+
+func writeInvocation(rec invocation) {
 	path := os.Getenv("FAKEAGENT_LOG")
 	if path == "" {
 		return
 	}
-	cwd, _ := os.Getwd()
-	rec := invocation{
-		Time:   time.Now().UTC().Format(time.RFC3339Nano),
-		Agent:  agent,
-		Args:   args,
-		Prompt: prompt,
-		CWD:    cwd,
-	}
+	rec.Time = time.Now().UTC().Format(time.RFC3339Nano)
+	rec.CWD, _ = os.Getwd()
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return

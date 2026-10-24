@@ -228,7 +228,7 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 		if !nativeFormat {
 			schema = nil
 		}
-		resp, err := a.sendMessage(msgCtx, baseURL, sessionID, prompt, schema)
+		resp, err := a.sendMessage(msgCtx, baseURL, sessionID, prompt, opts.Model, schema)
 		msgCh <- opencodeMessageResult{resp: resp, err: err, settled: true}
 	}()
 

@@ -42,9 +42,10 @@ type Harness struct {
 	AgentLog    string // every fake-agent invocation appended here, one JSON per line
 	Scenario    string // optional path to a scenario yaml; empty = built-in default
 
-	agentName         string // claude / codex / grok / opencode / antigravity
-	allowRepoCommands *bool  // mirrors SetupOpts.AllowRepoCommands
-	globalConfigExtra string // mirrors SetupOpts.GlobalConfigExtra
+	agentName         string                 // claude / codex / grok / opencode / antigravity
+	allowRepoCommands *bool                  // mirrors SetupOpts.AllowRepoCommands
+	globalConfigExtra string                 // mirrors SetupOpts.GlobalConfigExtra
+	autoFix           map[types.StepName]int // mirrors SetupOpts.AutoFix
 	daemonOwn         *e2edaemon.Ownership
 }
 
@@ -75,6 +76,11 @@ type SetupOpts struct {
 	// through the real loader - agent_timeout and review_agent_timeout, whose
 	// production defaults are half an hour, are the reason it was added.
 	GlobalConfigExtra string
+
+	// AutoFix replaces the harness's auto_fix budget (zero for every step,
+	// so each gate parks) for the steps it names. The block is generated, so
+	// GlobalConfigExtra cannot repeat the auto_fix key.
+	AutoFix map[types.StepName]int
 }
 
 const e2eDaemonStartTimeout = "45s"
@@ -110,6 +116,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 		agentName:         opts.Agent,
 		allowRepoCommands: opts.AllowRepoCommands,
 		globalConfigExtra: opts.GlobalConfigExtra,
+		autoFix:           opts.AutoFix,
 	}
 
 	for _, dir := range []string{h.BinDir, h.NMHome, h.HomeDir, h.WorkDir} {
@@ -214,13 +221,10 @@ log_level: debug
 agent_path_override:
   %s: %s
 auto_fix:
-  rebase: 0
-  lint: 0
-  test: 0
-  review: 0
-  document: 0
-  ci: 0
 `, h.agentName, h.agentName, binLink)
+	for _, step := range []types.StepName{types.StepRebase, types.StepLint, types.StepTest, types.StepReview, types.StepDocument, types.StepCI} {
+		cfg += fmt.Sprintf("  %s: %d\n", step, h.autoFix[step])
+	}
 	if extra := strings.TrimSpace(h.globalConfigExtra); extra != "" {
 		cfg += extra + "\n"
 	}
@@ -695,6 +699,10 @@ type Invocation struct {
 	Args   []string `json:"args"`
 	Prompt string   `json:"prompt"`
 	CWD    string   `json:"cwd,omitempty"`
+	// Model and Variant are what an opencode message body asked for; empty
+	// for every other fake and for a body that pinned neither.
+	Model   string `json:"model,omitempty"`
+	Variant string `json:"variant,omitempty"`
 }
 
 func (h *Harness) runGit(ctx context.Context, dir string, args ...string) ([]byte, error) {

@@ -49,6 +49,11 @@ type RunOpts struct {
 	// SessionFallback marks this invocation as the fresh-session retry after
 	// a failed resume. Instrumentation only; adapters ignore it.
 	SessionFallback bool
+	// Model is an optional per-invocation model in provider/model form (the
+	// fork's agent_model routing). The opencode adapter sends it in the
+	// message body in place of its profile's model, keeping the profile's
+	// effort; every other adapter fixes its model at launch and ignores it.
+	Model string
 	// Purpose labels the pipeline duty this invocation serves (review,
 	// review-fix, test-evidence, ...). The review-role router uses review and
 	// review-fix to select a harness; concrete adapters ignore it.

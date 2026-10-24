@@ -327,3 +327,53 @@ func TestFakeOpencodeServerAppliesEditsInSessionDirectory(t *testing.T) {
 		t.Fatalf("working directory edit err = %v, want not exist", err)
 	}
 }
+
+// The fake logs each message body's model and variant, so e2e tests can assert
+// per-invocation routing that never appears in opencode's argv.
+func TestFakeOpencodeServerLogsTheRequestedModelAndVariant(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "fakeagent.log")
+	t.Setenv("FAKEAGENT_LOG", logPath)
+	srv := newFakeOpencodeServer(&Scenario{})
+
+	post := func(path, body string) []byte {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST %s status = %d: %s", path, rec.Code, rec.Body.String())
+		}
+		return rec.Body.Bytes()
+	}
+	var session struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(post("/session", fmt.Sprintf(`{"directory":%q}`, t.TempDir())), &session); err != nil {
+		t.Fatalf("unmarshal session: %v", err)
+	}
+	post("/session/"+session.ID+"/message", `{"parts":[{"type":"text","text":"routed"}],"model":{"providerID":"deepseek","modelID":"deepseek-flash"},"variant":"high"}`)
+	post("/session/"+session.ID+"/message", `{"parts":[{"type":"text","text":"default"}]}`)
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
+	if len(lines) != 2 {
+		t.Fatalf("log lines = %d, want 2:\n%s", len(lines), data)
+	}
+	var routed, unrouted invocation
+	if err := json.Unmarshal(lines[0], &routed); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(lines[1], &unrouted); err != nil {
+		t.Fatal(err)
+	}
+	if routed.Prompt != "routed" || routed.Model != "deepseek/deepseek-flash" || routed.Variant != "high" {
+		t.Fatalf("routed invocation = %+v", routed)
+	}
+	if unrouted.Model != "" || unrouted.Variant != "" {
+		t.Fatalf("unrouted invocation logged a model: %+v", unrouted)
+	}
+}

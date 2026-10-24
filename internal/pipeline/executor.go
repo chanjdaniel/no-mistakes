@@ -1006,6 +1006,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// the recorder reads, so an operator-configured later-round review role
 		// and the recorded evidence name the same round.
 		stepAgent = &roundStampingAgent{inner: stepAgent, round: func() int { return roundNum + 1 }}
+		// The fork's per-step model routing (agent_model): one seam for every
+		// agent invocation of this step execution, fix rounds included.
+		stepAgent = &agentModelRoutingAgent{inner: stepAgent, config: e.config, stepName: stepName, log: writeLog}
 	}
 	ciReady := run.CIReadyAt != nil
 	ciReadyNoCI := run.CIReadyNoCI

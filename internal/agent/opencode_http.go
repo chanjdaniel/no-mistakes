@@ -83,8 +83,8 @@ func (a *opencodeAgent) connectEventStream(ctx context.Context, baseURL string) 
 	return resp.Body, nil
 }
 
-func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, prompt string, schema json.RawMessage) (*opencodeMessageResponse, error) {
-	respBytes, err := doJSON(ctx, http.MethodPost, baseURL+"/session/"+sessionID+"/message", nil, a.messageBody(prompt, schema))
+func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, prompt, model string, schema json.RawMessage) (*opencodeMessageResponse, error) {
+	respBytes, err := doJSON(ctx, http.MethodPost, baseURL+"/session/"+sessionID+"/message", nil, a.messageBody(prompt, model, schema))
 	if err != nil {
 		return nil, err
 	}
@@ -104,12 +104,18 @@ func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, pro
 // provider/model split is validated at construction by agentcfg, so a non-empty
 // model always yields the two fields opencode requires; opencode calls reasoning
 // effort a provider-specific "variant".
-func (a *opencodeAgent) messageBody(prompt string, schema json.RawMessage) map[string]any {
+//
+// A non-empty model is the invocation's own (RunOpts.Model, validated at config
+// load) and replaces the profile's model; the profile's effort still applies.
+func (a *opencodeAgent) messageBody(prompt, model string, schema json.RawMessage) map[string]any {
 	body := map[string]any{
 		"role":  "user",
 		"parts": []map[string]string{{"type": "text", "text": prompt}},
 	}
-	if provider, modelID, ok := agentcfg.SplitProviderModel(a.profile.Model); ok {
+	if model == "" {
+		model = a.profile.Model
+	}
+	if provider, modelID, ok := agentcfg.SplitProviderModel(model); ok {
 		body["model"] = map[string]string{"providerID": provider, "modelID": modelID}
 	}
 	if a.profile.Effort != "" {

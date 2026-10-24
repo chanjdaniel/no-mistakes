@@ -408,6 +408,46 @@ select the agents repairing tests, documentation, or CI. An opt-in
 that run. Eval capture strips these profiles so replay candidates remain
 authoritative.
 
+### agent_model
+
+Optional, **global-only** per-step model routing for `opencode`, a feature of this fork.
+Each key names a pipeline step, and every agent invocation of that step, its fix round included, asks opencode for that model.
+
+|         |                                                         |
+| ------- | ------------------------------------------------------- |
+| Type    | `map[opencode]map[step]provider/model`                  |
+| Keys    | `review`, `test`, `document`, `lint`                    |
+| Default | Empty (every step runs on the profile below)            |
+
+```yaml
+agent: opencode
+agent_model:
+  opencode:
+    review: deepseek/deepseek-v4-pro
+    test: deepseek/deepseek-v4-pro
+    document: deepseek/deepseek-flash
+    lint: deepseek/deepseek-flash
+```
+
+A step's fix round (`review-fix`, `test-fix`, the lint fix pass) uses its step's model.
+The `document` key also routes the combined document+lint housekeeping pass, because that pass runs in the Document step.
+A step without a key carries no per-step model, so it runs on [`agent_config.opencode.model`](#agent_config) when set, else on opencode's own default.
+Reasoning effort is not routed: `agent_config.opencode.effort` applies to every invocation, routed or not.
+
+Only `opencode` is accepted, because it is the one harness whose model rides each session message; every other harness fixes its model in argv when it starts.
+Use `agent_config` and `review_agents` for those harnesses.
+These are refused at config load, each naming the key: a harness other than `opencode`, an unknown step key (the error lists the valid ones), an empty value (delete the key instead), and a value that is not `provider/model`.
+
+The review loop is configured in `agent_model` or in [`review_agents`](#review_agents), never both: routing `review` while any `review_agents` role is set is refused at load, naming both keys.
+A route would otherwise silently override the role's model, and with the `*_after_round` roles silently cancel the escalation.
+Routing the other steps alongside `review_agents` is fine.
+
+Each step log (`~/.no-mistakes/logs/<run>/<step>.log`) records the routing once per step execution, before the first invocation it applies to:
+`using agent_model override for step <step>: <provider>/<model> (key <key>)`, or, for a step with no key, `no agent_model override configured for step <step>; running on agent default`.
+When the serving agent is not `opencode`, the log warns that it ignores per-step model overrides instead.
+With no `agent_model` configured, no-mistakes logs nothing and sends exactly what it would without this setting.
+Like `agent_config`, a repository's `.no-mistakes.yaml` cannot set it: the key is ignored there, and eval capture strips it.
+
 ### agent_args_override
 
 Extra CLI flags to pass to each native agent.

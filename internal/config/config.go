@@ -157,6 +157,12 @@ type GlobalConfig struct {
 	// ReviewAgents selects independent review-loop harnesses and profiles.
 	// Global-only: repository input must not select credential/model profiles.
 	ReviewAgents map[string]ReviewAgent `yaml:"review_agents"`
+	// AgentModel is the fork's per-step model routing (agent_model.opencode):
+	// agent_model key -> provider/model, resolved per invocation by
+	// Config.AgentModelFor. Global-only for the same reason as agent_config:
+	// repository input must not select which model runs with the operator's
+	// credentials.
+	AgentModel map[string]string `yaml:"-"`
 	// WorktreeRoots places a repository's pipeline run worktrees under a
 	// directory the operator chose instead of the default
 	// <NM_HOME>/worktrees/<repoID>. Keys are registered checkout paths
@@ -211,34 +217,35 @@ type GlobalConfig struct {
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
 type globalConfigRaw struct {
-	Agent                   agentList                  `yaml:"agent"`
-	ACPXPath                string                     `yaml:"acpx_path"`
-	ForgejoAXIPath          string                     `yaml:"forgejo_axi_path"`
-	ACPRegistryOverrides    map[string]string          `yaml:"acp_registry_overrides"`
-	AgentPathOverride       map[string]string          `yaml:"agent_path_override"`
-	AgentArgsOverride       map[string][]string        `yaml:"agent_args_override"`
-	AgentConfig             map[string]agentProfileRaw `yaml:"agent_config"`
-	ReviewAgents            map[string]ReviewAgent     `yaml:"review_agents"`
-	WorktreeRoots           map[string]string          `yaml:"worktree_roots"`
-	CITimeout               string                     `yaml:"ci_timeout"`
-	DaemonConnectTimeout    string                     `yaml:"daemon_connect_timeout"`
-	BranchSyncRemoteTimeout string                     `yaml:"branch_sync_remote_timeout"`
-	GateReconcileInterval   string                     `yaml:"gate_reconcile_interval"`
-	GateReconcileTimeout    string                     `yaml:"gate_reconcile_timeout"`
-	BabysitTimeout          string                     `yaml:"babysit_timeout"`
-	StepQuietWarning        string                     `yaml:"step_quiet_warning"`
-	AgentTimeout            string                     `yaml:"agent_timeout"`
-	ReviewAgentTimeout      string                     `yaml:"review_agent_timeout"`
-	TestAgentTimeout        string                     `yaml:"test_agent_timeout"`
-	LogLevel                string                     `yaml:"log_level"`
-	SessionReuse            *bool                      `yaml:"session_reuse"`
-	AutoFix                 AutoFixRaw                 `yaml:"auto_fix"`
-	CI                      CIRaw                      `yaml:"ci"`
-	Rebase                  RebaseRaw                  `yaml:"rebase"`
-	Commit                  GlobalCommitRaw            `yaml:"commit"`
-	Intent                  GlobalIntentRaw            `yaml:"intent"`
-	Test                    TestRaw                    `yaml:"test"`
-	Eval                    EvalRaw                    `yaml:"eval"`
+	Agent                   agentList                    `yaml:"agent"`
+	ACPXPath                string                       `yaml:"acpx_path"`
+	ForgejoAXIPath          string                       `yaml:"forgejo_axi_path"`
+	ACPRegistryOverrides    map[string]string            `yaml:"acp_registry_overrides"`
+	AgentPathOverride       map[string]string            `yaml:"agent_path_override"`
+	AgentArgsOverride       map[string][]string          `yaml:"agent_args_override"`
+	AgentConfig             map[string]agentProfileRaw   `yaml:"agent_config"`
+	ReviewAgents            map[string]ReviewAgent       `yaml:"review_agents"`
+	AgentModel              map[string]map[string]string `yaml:"agent_model"`
+	WorktreeRoots           map[string]string            `yaml:"worktree_roots"`
+	CITimeout               string                       `yaml:"ci_timeout"`
+	DaemonConnectTimeout    string                       `yaml:"daemon_connect_timeout"`
+	BranchSyncRemoteTimeout string                       `yaml:"branch_sync_remote_timeout"`
+	GateReconcileInterval   string                       `yaml:"gate_reconcile_interval"`
+	GateReconcileTimeout    string                       `yaml:"gate_reconcile_timeout"`
+	BabysitTimeout          string                       `yaml:"babysit_timeout"`
+	StepQuietWarning        string                       `yaml:"step_quiet_warning"`
+	AgentTimeout            string                       `yaml:"agent_timeout"`
+	ReviewAgentTimeout      string                       `yaml:"review_agent_timeout"`
+	TestAgentTimeout        string                       `yaml:"test_agent_timeout"`
+	LogLevel                string                       `yaml:"log_level"`
+	SessionReuse            *bool                        `yaml:"session_reuse"`
+	AutoFix                 AutoFixRaw                   `yaml:"auto_fix"`
+	CI                      CIRaw                        `yaml:"ci"`
+	Rebase                  RebaseRaw                    `yaml:"rebase"`
+	Commit                  GlobalCommitRaw              `yaml:"commit"`
+	Intent                  GlobalIntentRaw              `yaml:"intent"`
+	Test                    TestRaw                      `yaml:"test"`
+	Eval                    EvalRaw                      `yaml:"eval"`
 	// Jev is the retired jev.review_assist pre-brief block. The feature was
 	// removed after the offline trial showed its candidate listing cannot
 	// reach the review findings it is meant to surface. The key stays in the
@@ -695,6 +702,7 @@ type Config struct {
 	AgentArgsOverride     map[string][]string
 	AgentConfig           map[string]agentcfg.Profile
 	ReviewAgents          map[string]ReviewAgent
+	AgentModel            map[string]string
 	CITimeout             time.Duration
 	StepQuietWarning      time.Duration
 	AgentTimeout          time.Duration
@@ -2211,6 +2219,14 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		return nil, err
 	}
 	cfg.ReviewAgents = raw.ReviewAgents
+	routes, err := parseAgentModel(raw.AgentModel)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateAgentModelReviewAgents(routes, cfg.ReviewAgents); err != nil {
+		return nil, err
+	}
+	cfg.AgentModel = routes
 	if raw.WorktreeRoots != nil {
 		if err := ValidateWorktreeRoots(raw.WorktreeRoots); err != nil {
 			return nil, err
@@ -3168,6 +3184,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		AgentArgsOverride:     global.AgentArgsOverride,
 		AgentConfig:           global.AgentConfig,
 		ReviewAgents:          global.ReviewAgents,
+		AgentModel:            global.AgentModel,
 		CITimeout:             global.CITimeout,
 		StepQuietWarning:      global.StepQuietWarning,
 		AgentTimeout:          global.AgentTimeout,
