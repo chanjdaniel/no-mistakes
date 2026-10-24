@@ -430,7 +430,7 @@ agent_model:
     lint: deepseek/deepseek-flash
 ```
 
-A fix round uses its own key when set, else its step's key: `review-fix` is the review fixer's turn, `test-fix` the Test fix pass, `lint-fix` the Lint fix pass, and `ci-fix` the CI repair.
+A fix round uses its own key when set, else its step's key: `review-fix` is the review fixer's turn, `test-fix` the Test fix pass, `lint-fix` the Lint fix pass (with or without `commands.lint`), and `ci-fix` the CI repair.
 `ci` therefore routes the CI repair too while `ci-fix` is unset, because the repair is the CI step's only agent invocation.
 The `rebase` key routes the conflict resolver, the Rebase step's only invocation, so it has no fix-round key of its own; nor does `document`, which has no fix round.
 The `intent` key routes the intent summarizer and disambiguator, and `pr` the PR content and template calls.

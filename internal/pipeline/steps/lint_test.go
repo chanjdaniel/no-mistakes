@@ -145,6 +145,37 @@ func TestLintStep_NoConfiguredLint_CommitsAgentFixesWithoutApproval(t *testing.T
 	}
 }
 
+// TestLintStep_NoConfiguredLint_FixRoundRunsAsLintFix pins the purpose of
+// the agent lint pass: a fix round is "lint-fix", like executeFixMode's, so
+// agent_model's lint-fix key routes it and stats tell it apart; any other
+// round is "lint".
+func TestLintStep_NoConfiguredLint_FixRoundRunsAsLintFix(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		fixing bool
+		want   string
+	}{{false, "lint"}, {true, "lint-fix"}} {
+		dir, baseSHA, headSHA := setupGitRepo(t)
+		gitCmd(t, dir, "checkout", "--detach", headSHA)
+		var purposes []string
+		ag := &mockAgent{
+			name: "test",
+			runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				purposes = append(purposes, opts.Purpose)
+				return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"lint clean"}`)}, nil
+			},
+		}
+		sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+		sctx.Fixing = tc.fixing
+		if _, err := (&LintStep{}).Execute(sctx); err != nil {
+			t.Fatal(err)
+		}
+		if len(purposes) != 1 || purposes[0] != tc.want {
+			t.Errorf("fixing=%t: agent purposes = %q, want [%q]", tc.fixing, purposes, tc.want)
+		}
+	}
+}
+
 func TestLintStep_MalformedStructuredOutputFails(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

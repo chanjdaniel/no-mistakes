@@ -72,12 +72,18 @@ Rules:
 Previous lint findings to address:
 ` + sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
 		}
+		// A fix round is this same agent pass, so it carries executeFixMode's
+		// fix purpose: agent_model's lint-fix key routes it by purpose.
+		purpose := "lint"
+		if sctx.Fixing {
+			purpose = "lint-fix"
+		}
 		result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 			Prompt:     fixerPrompt(prompt),
 			CWD:        sctx.WorkDir,
 			JSONSchema: findingsSchema,
 			OnChunk:    sctx.LogChunk,
-			Purpose:    "lint",
+			Purpose:    purpose,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("agent lint: %w", err)

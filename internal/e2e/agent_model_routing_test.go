@@ -608,3 +608,95 @@ func TestAgentModelRoutesCIFixRoundOnRealBinary(t *testing.T) {
 		t.Errorf("ci log is missing %q:\n%s", want, log)
 	}
 }
+
+const routedLintFixModel = "deepseek/lint-fix-pro-e2e"
+
+// writeAgentLintFixScenario scripts a run whose housekeeping pass reports one
+// lint finding a human sends to the lint fix round; every other turn is clean.
+func writeAgentLintFixScenario(t *testing.T) string {
+	t.Helper()
+	content := `actions:
+  - match: "` + routingLintFixMarker + `"
+    text: "fixed the lint issue"
+    edits:
+      - path: "lint.txt"
+        new: "lint clean\n"
+    stage: ["lint.txt"]
+    structured:
+      findings: []
+      summary: "fix lint issue"
+  - match: "` + routingHousekeepingMarker + `"
+    text: "one lint issue left"
+    structured:
+      findings:
+        - id: "routing-lint"
+          severity: warning
+          description: "formatting issue for the lint fixer"
+          file: "feature.txt"
+          action: auto-fix
+          category: lint
+      summary: "one lint issue"
+  -` + strings.TrimPrefix(cleanRoutingResponse, "   ")
+	return writeRoutingScenario(t, "agent-lint-fix-scenario.yaml", content)
+}
+
+// TestAgentModelRoutesTheAgentLintFixRoundOnRealBinary proves the lint-fix key
+// on a repository with no commands.lint, where the lint fix round is the agent
+// lint pass itself: with lint and lint-fix both set, the housekeeping pass
+// runs on document's default, the fix round asks for lint-fix's model, says
+// so in lint.log, and records its row with the purpose lint-fix.
+func TestAgentModelRoutesTheAgentLintFixRoundOnRealBinary(t *testing.T) {
+	h := NewHarness(t, SetupOpts{
+		Agent:    "opencode",
+		Scenario: writeAgentLintFixScenario(t),
+		GlobalConfigExtra: "agent_model:\n  opencode:\n" +
+			"    lint: " + routedLintModel + "\n" +
+			"    lint-fix: " + routedLintFixModel + "\n",
+		AutoFix: gateAutoFix,
+	})
+	if out, err := h.Run("init"); err != nil {
+		t.Fatalf("nm init: %v\n%s", err, out)
+	}
+	const branch = "feature/lint-fix-routing"
+	h.CommitChange(branch, "feature.txt", "seed for lint-fix routing\n", "add feature for lint-fix routing")
+	h.PushToGate(branch)
+	gated := waitForStepStatus(t, h, branch, types.StepLint, types.StepStatusAwaitingApproval, 120*time.Second)
+	if gated == nil {
+		t.Fatal("run did not park at the lint gate")
+	}
+	h.RespondWithFindings(gated.ID, types.StepLint, types.ActionFix, []string{"routing-lint"})
+	run := waitForCompletedRun(t, h, branch)
+
+	fixes := 0
+	for _, inv := range h.AgentInvocations() {
+		if invocationStep(inv) != "lint" {
+			continue
+		}
+		fixes++
+		if inv.Model != routedLintFixModel {
+			t.Errorf("lint fix round asked for model %q, want lint-fix's %q", inv.Model, routedLintFixModel)
+		}
+	}
+	if fixes != 1 {
+		t.Fatalf("lint fix rounds = %d, want 1\n%s", fixes, dumpPrompts(h.AgentInvocations()))
+	}
+	var purposes []string
+	for _, row := range runAgentInvocations(t, h, run.ID) {
+		if row.StepName == string(types.StepLint) {
+			purposes = append(purposes, row.Purpose)
+		}
+	}
+	if len(purposes) != 1 || purposes[0] != "lint-fix" {
+		t.Errorf("lint agent_invocations purposes = %q, want exactly one lint-fix", purposes)
+	}
+	assertServedModels(t, h, run.ID, func(row db.AgentInvocation) string {
+		if row.StepName == "lint" {
+			return routedLintFixModel
+		}
+		return ""
+	})
+	const want = "using agent_model override for step lint: " + routedLintFixModel + " (key lint-fix)"
+	if log := readRunStepLog(t, h, run.ID, types.StepLint); !strings.Contains(log, want) {
+		t.Errorf("lint log is missing %q:\n%s", want, log)
+	}
+}
