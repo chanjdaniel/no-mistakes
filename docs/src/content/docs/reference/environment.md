@@ -232,12 +232,12 @@ no-mistakes stamps `COMPACT_ADVISER_DISABLE=1` onto every spawned gate agent, in
 
 Override the telemetry collection host.
 
-|         |                             |
-| ------- | --------------------------- |
-| Type    | `URL`                       |
-| Default | `https://a.kunchenguid.com` |
+|         |                                 |
+| ------- | ------------------------------- |
+| Type    | `URL`                           |
+| Default | none (this fork embeds no host) |
 
-When set, telemetry sends events to this host's `/api/send` endpoint. If it is unset in a dev build, `no-mistakes` also checks a repo-local `.env` file for `NO_MISTAKES_UMAMI_HOST`. If no runtime value is found, it falls back to any host embedded at build time and then the default self-hosted Umami instance.
+When set, telemetry sends events to this host's `/api/send` endpoint. If it is unset in a dev build, `no-mistakes` also checks a repo-local `.env` file for `NO_MISTAKES_UMAMI_HOST`. If no runtime value is found, it falls back to any host embedded at build time. This fork has no default host, so with none configured telemetry stays off.
 
 ## `NO_MISTAKES_UMAMI_WEBSITE_ID`
 
@@ -246,7 +246,7 @@ Override or enable the telemetry website ID.
 |         |                                                                         |
 | ------- | ----------------------------------------------------------------------- |
 | Type    | `string`                                                                |
-| Default | embedded in Makefile and release builds; unset in unembedded dev builds |
+| Default | unset (this fork's Makefile embeds none); embedded in upstream releases |
 
 When set, telemetry uses this website ID at runtime. If it is unset in a dev build, `no-mistakes` also checks a repo-local `.env` file for `NO_MISTAKES_UMAMI_WEBSITE_ID`. If no runtime value is found, it falls back to any website ID embedded at build time.
 
