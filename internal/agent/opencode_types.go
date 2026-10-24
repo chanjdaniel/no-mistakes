@@ -39,13 +39,26 @@ type opencodeEventInfo struct {
 	ID     string          `json:"id,omitempty"`
 	Role   string          `json:"role,omitempty"`
 	Tokens *opencodeTokens `json:"tokens,omitempty"`
+	opencodeServedModel
+}
+
+// opencodeServedModel is the model an assistant message ran on, as opencode
+// reports it on the message's info (in the stream's message.updated events and
+// in the message response). A user message names the requested model in a
+// nested `model` object instead, so these flat fields are the served identity.
+type opencodeServedModel struct {
+	ModelID    string `json:"modelID,omitempty"`
+	ProviderID string `json:"providerID,omitempty"`
 }
 
 // opencodeTokens is the token usage structure in OpenCode responses.
+// Reasoning is reported apart from Output (providers bill it as output), and
+// is a pointer so an opencode that omits it records unknown, not zero.
 type opencodeTokens struct {
-	Input  int            `json:"input"`
-	Output int            `json:"output"`
-	Cache  *opencodeCache `json:"cache,omitempty"`
+	Input     int            `json:"input"`
+	Output    int            `json:"output"`
+	Reasoning *int           `json:"reasoning,omitempty"`
+	Cache     *opencodeCache `json:"cache,omitempty"`
 }
 
 type opencodeCache struct {
@@ -73,6 +86,7 @@ type opencodeMessageInfo struct {
 	Structured json.RawMessage       `json:"structured,omitempty"`
 	Error      *opencodeMessageError `json:"error,omitempty"`
 	Tokens     *opencodeTokens       `json:"tokens,omitempty"`
+	opencodeServedModel
 }
 
 // opencodeMessageError mirrors the discriminated AssistantError union in
@@ -227,12 +241,15 @@ type opencodeTextPart struct {
 
 // opencodeStreamState holds mutable state during SSE event processing.
 type opencodeStreamState struct {
-	sessionID       string
-	onChunk         func(string)
-	textParts       map[string]*opencodeTextPart
-	textPartOrder   []string
-	usageByMsg      map[string]TokenUsage
-	usage           TokenUsage
+	sessionID     string
+	onChunk       func(string)
+	textParts     map[string]*opencodeTextPart
+	textPartOrder []string
+	usageByMsg    map[string]TokenUsage
+	usage         TokenUsage
+	// served is the latest assistant message's model identity, from the
+	// stream or the message response, whichever reported it last.
+	served          opencodeServedModel
 	lastText        string
 	lastFinalText   string
 	userMsgIDs      map[string]bool

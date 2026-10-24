@@ -171,17 +171,19 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 	// invocation records must carry both. Each attempt is its own fresh
 	// session and opencode never reports cumulatively, so the two are
 	// independent deltas that simply add.
-	nativeUsage := TokenUsage{}
-	if result != nil {
-		nativeUsage = result.Usage
-	}
+	// The served model is the fallback turn's, the one that produced the
+	// answer; the native turn's stands only when the fallback reported none.
+	native := result
 	result, fallbackErr := a.runOnceWithFormat(ctx, opts, false)
 	if result == nil {
-		result = resultFromUsage(nativeUsage)
-	} else {
-		result.Usage.Add(nativeUsage)
+		result = native
+	} else if native != nil {
+		result.Usage.Add(native.Usage)
 		result.UsageReported = result.Usage.Reported
 		result.CacheCreationReported = result.Usage.CacheCreationReported
+		if result.Model == "" {
+			result.Model, result.ModelProvider = native.Model, native.ModelProvider
+		}
 	}
 	if fallbackErr != nil {
 		return result, fmt.Errorf("opencode prompt-only structured output fallback: %w", fallbackErr)
@@ -264,23 +266,23 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 		evidence := resolveOpencodeToolEvidence(state, mr, false)
 		if mr.settled && mr.err != nil {
 			if nativeFormat && isThinkingToolChoiceConflictText(mr.err.Error()) {
-				return resultFromUsage(state.usage), thinkingConflict(evidence, mr.err)
+				return state.partialResult(), thinkingConflict(evidence, mr.err)
 			}
 			if nativeFormat && isForcedToolChoiceUnsupportedText(mr.err.Error()) {
 				return nil, forcedToolChoiceConflict(evidence, mr.err)
 			}
-			return resultFromUsage(state.usage), opencodeTurnFailure(evidence, fmt.Errorf("opencode message: %w", mr.err))
+			return state.partialResult(), opencodeTurnFailure(evidence, fmt.Errorf("opencode message: %w", mr.err))
 		}
 		if !aborted {
 			a.abortSession(baseURL, sessionID)
 		}
 		if nativeFormat && errors.Is(err, errOpencodeThinkingToolChoiceConflict) {
-			return resultFromUsage(state.usage), thinkingConflict(evidence, nil)
+			return state.partialResult(), thinkingConflict(evidence, nil)
 		}
 		if nativeFormat && errors.Is(err, errOpencodeForcedToolChoiceUnsupported) {
 			return nil, forcedToolChoiceConflict(evidence, nil)
 		}
-		return resultFromUsage(state.usage), opencodeTurnFailure(evidence, fmt.Errorf("opencode events: %w", err))
+		return state.partialResult(), opencodeTurnFailure(evidence, fmt.Errorf("opencode events: %w", err))
 	}
 
 	// Wait for message response. The stream ran to session.idle, so every
@@ -290,12 +292,12 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 	evidence := resolveOpencodeToolEvidence(state, mr, true)
 	if mr.err != nil {
 		if nativeFormat && isThinkingToolChoiceConflictText(mr.err.Error()) {
-			return resultFromUsage(state.usage), thinkingConflict(evidence, mr.err)
+			return state.partialResult(), thinkingConflict(evidence, mr.err)
 		}
 		if nativeFormat && isForcedToolChoiceUnsupportedText(mr.err.Error()) {
 			return nil, forcedToolChoiceConflict(evidence, mr.err)
 		}
-		return resultFromUsage(state.usage), opencodeTurnFailure(evidence, fmt.Errorf("opencode message: %w", mr.err))
+		return state.partialResult(), opencodeTurnFailure(evidence, fmt.Errorf("opencode message: %w", mr.err))
 	}
 
 	// Update usage and text from message response
@@ -315,6 +317,9 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 		if mr.resp.Info.Role == "assistant" && mr.resp.Info.Tokens != nil {
 			state.usageByMsg[mr.resp.Info.ID] = opencodeTokensToUsage(mr.resp.Info.Tokens)
 			state.usage = accumulateUsage(state.usageByMsg)
+		}
+		if mr.resp.Info.Role == "assistant" {
+			state.noteServed(mr.resp.Info.opencodeServedModel)
 		}
 		for _, part := range mr.resp.Parts {
 			if part.Type != "text" || strings.TrimSpace(part.Text) == "" {
@@ -353,13 +358,13 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 
 	// Prefer structured output from response
 	if mr.resp != nil && mr.resp.Info != nil && mr.resp.Info.Structured != nil {
-		return &Result{
+		return state.stamp(&Result{
 			Output:                mr.resp.Info.Structured,
 			Text:                  state.lastText,
 			Usage:                 state.usage,
 			UsageReported:         state.usage.Reported,
 			CacheCreationReported: state.usage.CacheCreationReported,
-		}, nil
+		}), nil
 	}
 
 	// A thinking model rejecting the forced tool_choice, or a gateway
@@ -367,7 +372,7 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 	// prompt-only fallback in runOnce, so both must be recognised before the
 	// general failure below claims them.
 	if nativeFormat && mr.resp != nil && mr.resp.Info != nil && isThinkingToolChoiceConflict(mr.resp.Info.Error) {
-		return resultFromUsage(state.usage), thinkingConflict(evidence, nil)
+		return state.partialResult(), thinkingConflict(evidence, nil)
 	}
 	if nativeFormat && mr.resp != nil && mr.resp.Info != nil && isForcedToolChoiceUnsupported(mr.resp.Info.Error) {
 		return nil, forcedToolChoiceConflict(evidence, nil)
@@ -385,7 +390,7 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 	// case with the same wording and decodes the nested error payload the
 	// flat fields never carried.
 	if mr.resp != nil && mr.resp.Info != nil && mr.resp.Info.Error != nil {
-		return resultFromUsage(state.usage), newOpencodeMessageFailure(mr.resp.Info.Error, evidence == opencodeToolsRan)
+		return state.partialResult(), newOpencodeMessageFailure(mr.resp.Info.Error, evidence == opencodeToolsRan)
 	}
 
 	// Fall back to parsing JSON from text
@@ -394,6 +399,7 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 		outputText = state.lastText
 	}
 	result, err := finalizeTextResult("opencode", outputText, opts.JSONSchema, state.usage)
+	result = state.stamp(result)
 	if err != nil {
 		// A parse failure quotes the model's own output, so whether it looks
 		// transient to the shared classifier is decided by text the model

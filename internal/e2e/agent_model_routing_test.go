@@ -301,6 +301,7 @@ func TestAgentModelRoutesEachStepOnRealBinary(t *testing.T) {
 	if log := readRunStepLog(t, h, run.ID, types.StepIntent); !strings.Contains(log, unrouted) {
 		t.Errorf("intent log is missing %q:\n%s", unrouted, log)
 	}
+	assertServedModels(t, h, run.ID, func(row db.AgentInvocation) string { return wantByStep[row.StepName] })
 }
 
 // TestAgentModelKeepsAgentConfigEffortOnRealBinary proves the precedence on
@@ -533,6 +534,17 @@ func TestAgentModelRoutesNewStepAndFixRoundKeysOnRealBinary(t *testing.T) {
 		}
 	}
 	assertOneCIFixRow(t, h, run.ID)
+	assertServedModels(t, h, run.ID, func(row db.AgentInvocation) string {
+		switch {
+		case row.StepName == "intent", row.StepName == "pr", row.StepName == "ci":
+			return routedCheapModel
+		case row.StepName == "test" && row.Purpose == "test-fix":
+			return routedTestFixModel
+		case row.StepName == "test":
+			return routedTestOnlyModel
+		}
+		return ""
+	})
 
 	for step, lines := range map[types.StepName][]string{
 		types.StepIntent: {"using agent_model override for step intent: " + routedCheapModel + " (key intent)"},
@@ -588,6 +600,12 @@ func TestAgentModelRoutesCIFixRoundOnRealBinary(t *testing.T) {
 		t.Fatalf("CI repairs = %d, want 1\n%s", repairs, dumpPrompts(h.AgentInvocations()))
 	}
 	assertOneCIFixRow(t, h, run.ID)
+	assertServedModels(t, h, run.ID, func(row db.AgentInvocation) string {
+		if row.StepName == "ci" {
+			return routedCIFixModel
+		}
+		return ""
+	})
 	const want = "using agent_model override for step ci: " + routedCIFixModel + " (key ci-fix)"
 	if log := readRunStepLog(t, h, run.ID, types.StepCI); !strings.Contains(log, want) {
 		t.Errorf("ci log is missing %q:\n%s", want, log)

@@ -451,6 +451,7 @@ Each step log (`~/.no-mistakes/logs/<run>/<step>.log`) records the routing once 
 `using agent_model override for step <step>: <provider>/<model> (key <key>)`, or, for a step with no key, `no agent_model override configured for step <step>; running on agent default`.
 When the serving agent is not `opencode`, the log warns that it ignores per-step model overrides instead.
 With no `agent_model` configured, no-mistakes logs nothing and sends exactly what it would without this setting.
+`no-mistakes stats --run <id>` shows the model opencode reported serving each invocation, so a route is proven by what served, not only by the log line.
 Like `agent_config`, a repository's `.no-mistakes.yaml` cannot set it: the key is ignored there, and eval capture strips it.
 
 ### agent_args_override

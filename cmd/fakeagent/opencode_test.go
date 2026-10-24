@@ -58,7 +58,7 @@ func TestPatchOpencodeMessageRequiresRecordedInfo(t *testing.T) {
 
 	_, err := patchOpencodeMessage([]byte(`{"id":"msg-123"}`), Action{
 		Structured: map[string]any{"summary": "ok"},
-	})
+	}, fakeOpencodeDefaultModel)
 	if err == nil {
 		t.Fatal("expected malformed recorded message to fail")
 	}
@@ -80,7 +80,7 @@ func TestPatchOpencodeMessagePreservesRecordedInfo(t *testing.T) {
 	t.Helper()
 
 	raw := []byte(`{"info":{"id":"msg-123","role":"assistant"}}`)
-	patched, err := patchOpencodeMessage(raw, Action{Structured: map[string]any{"summary": "ok"}})
+	patched, err := patchOpencodeMessage(raw, Action{Structured: map[string]any{"summary": "ok"}}, fakeOpencodeDefaultModel)
 	if err != nil {
 		t.Fatalf("patchOpencodeMessage: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestPatchOpencodeMessagePreservesStructuredRaw(t *testing.T) {
 	t.Helper()
 
 	raw := []byte(`{"info":{"id":"msg-123","role":"assistant"}}`)
-	patched, err := patchOpencodeMessage(raw, Action{StructuredRaw: `"not an object"`})
+	patched, err := patchOpencodeMessage(raw, Action{StructuredRaw: `"not an object"`}, fakeOpencodeDefaultModel)
 	if err != nil {
 		t.Fatalf("patchOpencodeMessage: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestOpencodeFixtureRewritesSessionIDsPerRequest(t *testing.T) {
 		t.Fatal("rewritten session payload should not keep recorded session ID")
 	}
 
-	rewrittenSSE, err := rewriteOpencodeFixtureSSE(fixture, Action{Structured: map[string]any{"summary": "ok"}}, "ses_first")
+	rewrittenSSE, err := rewriteOpencodeFixtureSSE(fixture, Action{Structured: map[string]any{"summary": "ok"}}, "ses_first", fakeOpencodeDefaultModel)
 	if err != nil {
 		t.Fatalf("rewrite sse: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestOpencodeFixtureRewritesSessionIDsPerRequest(t *testing.T) {
 		t.Fatalf("rewritten sse = %s, want recorded session ID removed", rewrittenSSE)
 	}
 
-	rewrittenMessage, err := rewriteOpencodeFixtureMessage(fixture, Action{Structured: map[string]any{"summary": "ok"}}, "ses_first")
+	rewrittenMessage, err := rewriteOpencodeFixtureMessage(fixture, Action{Structured: map[string]any{"summary": "ok"}}, "ses_first", fakeOpencodeDefaultModel)
 	if err != nil {
 		t.Fatalf("rewrite message: %v", err)
 	}
@@ -376,4 +376,123 @@ func TestFakeOpencodeServerLogsTheRequestedModelAndVariant(t *testing.T) {
 	if unrouted.Model != "" || unrouted.Variant != "" {
 		t.Fatalf("unrouted invocation logged a model: %+v", unrouted)
 	}
+}
+
+// TestFakeOpencodeServerServesTheRequestedModel proves the fake answers the
+// way opencode does: every assistant message, in the stream and in the
+// response, carries the model the body asked for (or the fixed default when it
+// asked for none) and reasoning tokens - in both synthetic and recorded-fixture
+// mode.
+func TestFakeOpencodeServerServesTheRequestedModel(t *testing.T) {
+	recorded, err := loadOpencodeFixture(filepath.Join("..", "..", "internal", "e2e", "fixtures", "opencode"), "structured")
+	if err != nil {
+		t.Fatalf("load recorded fixture: %v", err)
+	}
+	for _, mode := range []struct {
+		name    string
+		fixture *opencodeFixture
+	}{{"synthetic", nil}, {"fixture", recorded}} {
+		for _, tc := range []struct {
+			name, body, provider, model string
+		}{
+			{"routed", `{"parts":[{"type":"text","text":"routed"}],"model":{"providerID":"deepseek","modelID":"deepseek-flash"}}`, "deepseek", "deepseek-flash"},
+			{"default", `{"parts":[{"type":"text","text":"default"}]}`, "openai", "gpt-5.4"},
+		} {
+			t.Run(mode.name+"/"+tc.name, func(t *testing.T) {
+				t.Setenv("FAKEAGENT_LOG", filepath.Join(t.TempDir(), "fakeagent.log"))
+				srv := newFakeOpencodeServer(&Scenario{})
+				srv.fixture = mode.fixture
+				session := postFakeOpencode(t, srv, "/session", fmt.Sprintf(`{"directory":%q}`, t.TempDir()))
+				var created struct {
+					ID string `json:"id"`
+				}
+				if err := json.Unmarshal(session, &created); err != nil {
+					t.Fatalf("unmarshal session: %v", err)
+				}
+
+				ch := make(chan []byte, 32)
+				srv.subscribe(ch)
+				defer srv.unsubscribe(ch)
+				resp := postFakeOpencode(t, srv, "/session/"+created.ID+"/message", tc.body)
+
+				var msg struct {
+					Info servedInfo `json:"info"`
+				}
+				if err := json.Unmarshal(resp, &msg); err != nil {
+					t.Fatalf("unmarshal message: %v", err)
+				}
+				msg.Info.check(t, "response", tc.provider, tc.model)
+
+				assistants := 0
+				for len(ch) > 0 {
+					for _, info := range assistantInfos(t, <-ch) {
+						info.check(t, "stream", tc.provider, tc.model)
+						assistants++
+					}
+				}
+				if assistants == 0 {
+					t.Fatal("stream carried no assistant message.updated event")
+				}
+			})
+		}
+	}
+}
+
+type servedInfo struct {
+	Role       string `json:"role"`
+	ModelID    string `json:"modelID"`
+	ProviderID string `json:"providerID"`
+	Tokens     *struct {
+		Reasoning *int `json:"reasoning"`
+	} `json:"tokens"`
+}
+
+func (i servedInfo) check(t *testing.T, where, provider, model string) {
+	t.Helper()
+	if i.ProviderID != provider || i.ModelID != model {
+		t.Errorf("%s served %s/%s, want %s/%s", where, i.ProviderID, i.ModelID, provider, model)
+	}
+	if i.Tokens == nil || i.Tokens.Reasoning == nil {
+		t.Errorf("%s reported no reasoning tokens", where)
+	}
+}
+
+// assistantInfos reads the assistant message.updated infos out of SSE-framed
+// bytes.
+func assistantInfos(t *testing.T, framed []byte) []servedInfo {
+	t.Helper()
+	var infos []servedInfo
+	for _, line := range bytes.Split(framed, []byte("\n")) {
+		data, ok := bytes.CutPrefix(bytes.TrimSpace(line), []byte("data:"))
+		if !ok {
+			continue
+		}
+		var event struct {
+			Payload struct {
+				Type       string `json:"type"`
+				Properties struct {
+					Info *servedInfo `json:"info"`
+				} `json:"properties"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal(bytes.TrimSpace(data), &event); err != nil {
+			t.Fatalf("parse sse event %s: %v", data, err)
+		}
+		if event.Payload.Type == "message.updated" && event.Payload.Properties.Info != nil && event.Payload.Properties.Info.Role == "assistant" {
+			infos = append(infos, *event.Payload.Properties.Info)
+		}
+	}
+	return infos
+}
+
+func postFakeOpencode(t *testing.T, srv *fakeOpencodeServer, path, body string) []byte {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST %s status = %d: %s", path, rec.Code, rec.Body.String())
+	}
+	return rec.Body.Bytes()
 }
