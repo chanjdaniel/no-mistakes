@@ -80,17 +80,14 @@ const cleanRoutingResponse = `    text: "no issues found"
       body: "## Summary\nagent_model routing e2e"
 `
 
-// writeAgentModelRoutingScenario scripts one run through every routed step
-// and its fix round: the intent summarizer matches, the review reports one
-// finding a human sends to the fixer, the first test pass fails and the test
-// fix round repairs it, and the combined housekeeping pass reports one lint
-// finding a human sends to the lint fix round. Every round after a fix carries
-// the step's round history and comes back clean. First match wins, so the fix
+// agentModelRoutingActions scripts one run through every routed step and its
+// fix round: the intent summarizer matches, the review reports one finding a
+// human sends to the fixer, the first test pass fails and the test fix round
+// repairs it, and the combined housekeeping pass reports one lint finding a
+// human sends to the lint fix round. Every round after a fix carries the
+// step's round history and comes back clean. First match wins, so the fix
 // turns lead.
-func writeAgentModelRoutingScenario(t *testing.T) string {
-	t.Helper()
-	content := `actions:
-  - match: "` + routingTestFixMarker + `"
+const agentModelRoutingActions = `  - match: "` + routingTestFixMarker + `"
     text: "fixed the failing test"
     edits:
       - path: "feature.txt"
@@ -167,12 +164,12 @@ func writeAgentModelRoutingScenario(t *testing.T) string {
     text: "summarized"
     structured:
       summary: "user wanted agent_model routing exercised"
-  -` + strings.TrimPrefix(cleanRoutingResponse, "   ")
-	path := filepath.Join(t.TempDir(), "agent-model-routing-scenario.yaml")
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("write scenario: %v", err)
-	}
-	return path
+`
+
+func writeAgentModelRoutingScenario(t *testing.T) string {
+	t.Helper()
+	content := "actions:\n" + agentModelRoutingActions + "  -" + strings.TrimPrefix(cleanRoutingResponse, "   ")
+	return writeRoutingScenario(t, "agent-model-routing-scenario.yaml", content)
 }
 
 // stepPhase reads the gate-step phase boundary every step invocation's prompt

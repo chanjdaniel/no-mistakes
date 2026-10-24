@@ -44,6 +44,7 @@ type Harness struct {
 
 	agentName         string                 // claude / codex / grok / opencode / antigravity
 	allowRepoCommands *bool                  // mirrors SetupOpts.AllowRepoCommands
+	globalConfig      string                 // mirrors SetupOpts.GlobalConfig
 	globalConfigExtra string                 // mirrors SetupOpts.GlobalConfigExtra
 	autoFix           map[types.StepName]int // mirrors SetupOpts.AutoFix
 	daemonOwn         *e2edaemon.Ownership
@@ -70,6 +71,12 @@ type SetupOpts struct {
 	// (commands must come from the trusted default branch) pass a pointer
 	// to false to exercise the secure default.
 	AllowRepoCommands *bool
+
+	// GlobalConfig, when set, is the global config.yaml itself in place of
+	// the generated agent, log_level and auto_fix lines: the harness appends
+	// only agent_path_override, so the real loader reads a fixture's keys as
+	// written. Its agent must be Agent, and AutoFix cannot be combined with it.
+	GlobalConfig string
 
 	// GlobalConfigExtra is appended verbatim to the generated global
 	// config.yaml. It exists for operator-only settings a test must exercise
@@ -115,6 +122,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 		Scenario:          opts.Scenario,
 		agentName:         opts.Agent,
 		allowRepoCommands: opts.AllowRepoCommands,
+		globalConfig:      opts.GlobalConfig,
 		globalConfigExtra: opts.GlobalConfigExtra,
 		autoFix:           opts.AutoFix,
 	}
@@ -216,14 +224,18 @@ func (h *Harness) writeGlobalConfig() {
 		h.t.Fatalf("mkdir nm home: %v", err)
 	}
 	binLink := filepath.Join(h.BinDir, h.agentName)
-	cfg := fmt.Sprintf(`agent: %s
-log_level: debug
-agent_path_override:
-  %s: %s
-auto_fix:
-`, h.agentName, h.agentName, binLink)
-	for _, step := range []types.StepName{types.StepRebase, types.StepLint, types.StepTest, types.StepReview, types.StepDocument, types.StepCI} {
-		cfg += fmt.Sprintf("  %s: %d\n", step, h.autoFix[step])
+	pathOverride := fmt.Sprintf("agent_path_override:\n  %s: %s\n", h.agentName, binLink)
+	var cfg string
+	if h.globalConfig != "" {
+		if h.autoFix != nil {
+			h.t.Fatal("SetupOpts.GlobalConfig carries its own auto_fix; drop SetupOpts.AutoFix")
+		}
+		cfg = strings.TrimRight(h.globalConfig, "\n") + "\n" + pathOverride
+	} else {
+		cfg = fmt.Sprintf("agent: %s\nlog_level: debug\n", h.agentName) + pathOverride + "auto_fix:\n"
+		for _, step := range []types.StepName{types.StepRebase, types.StepLint, types.StepTest, types.StepReview, types.StepDocument, types.StepCI} {
+			cfg += fmt.Sprintf("  %s: %d\n", step, h.autoFix[step])
+		}
 	}
 	if extra := strings.TrimSpace(h.globalConfigExtra); extra != "" {
 		cfg += extra + "\n"
