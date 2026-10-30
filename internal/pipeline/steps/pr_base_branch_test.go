@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -415,7 +414,7 @@ func TestCIStep_AutoFixStillPrefersExistingPRForgeBase(t *testing.T) {
 	gitCmd(t, upstream, "init", "--bare")
 	gitCmd(t, dir, "remote", "add", "origin", upstream)
 	gitCmd(t, dir, "push", "origin", "main")
-	gitCmd(t, dir, "checkout", "-b", "develop")
+	gitCmd(t, dir, "checkout", "-b", "develop", "main")
 	if err := os.WriteFile(filepath.Join(dir, "develop.txt"), []byte("develop\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -423,8 +422,9 @@ func TestCIStep_AutoFixStillPrefersExistingPRForgeBase(t *testing.T) {
 	gitCmd(t, dir, "commit", "-m", "develop")
 	developTip := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "push", "origin", "develop")
+	gitCmd(t, dir, "checkout", "feature")
 
-	sctx := newTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContext(t, noAgent(t), dir, baseSHA, headSHA, config.Commands{})
 	sctx.Repo.UpstreamURL = "https://github.com/test/repo.git"
 	sctx.Run.Branch = "refs/heads/feature"
 	runBase := "epic/feature"
@@ -433,11 +433,6 @@ func TestCIStep_AutoFixStillPrefersExistingPRForgeBase(t *testing.T) {
 	sctx.Config.AutoFix = config.AutoFix{CI: 1}
 	pr := &scm.PR{Number: "42", URL: "https://github.com/test/repo/pull/42", BaseBranch: "develop"}
 
-	var prompt string
-	sctx.Agent = &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		prompt = opts.Prompt
-		return &agent.Result{}, nil
-	}}
 	sctx.Env = fakeCIGHMergeable(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`, "CONFLICTING")
 	host, skip := buildHost(sctx, scm.ProviderGitHub)
 	if host == nil {
@@ -446,8 +441,8 @@ func TestCIStep_AutoFixStillPrefersExistingPRForgeBase(t *testing.T) {
 	if _, err := (&CIStep{}).autoFixCI(sctx, host, pr, ciTargetsFor(nil, true)); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(prompt, "base commit: "+developTip) {
-		t.Fatalf("expected existing PR forge base %s to win over per-run override, got:\n%s", developTip, prompt)
+	if got := strings.Fields(gitCmd(t, dir, "rev-list", "--parents", "-n", "1", "HEAD")); len(got) != 3 || got[1] != headSHA || got[2] != developTip {
+		t.Fatalf("HEAD = %v, want the existing PR forge base merged over the per-run override: [%s %s]", got, headSHA, developTip)
 	}
 }
 

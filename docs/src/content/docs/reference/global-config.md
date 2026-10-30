@@ -70,7 +70,6 @@ forge_profiles:
     glab_config_dir: ~/.config/glab-work
 
 auto_fix:
-  rebase: 3
   review: 0
   test: 3
   document: 3
@@ -82,7 +81,7 @@ ci:
   revalidate_repairs: false
 
 rebase:
-  strategy: rebase # or: merge
+  strategy: merge # the default and only accepted value; rebase is refused
 
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
@@ -432,7 +431,7 @@ agent_model:
 
 A fix round uses its own key when set, else its step's key: `review-fix` is the review fixer's turn, `test-fix` the Test fix pass, `lint-fix` the Lint fix pass (with or without `commands.lint`), and `ci-fix` the CI repair.
 `ci` therefore routes the CI repair too while `ci-fix` is unset, because the repair is the CI step's only agent invocation.
-The `rebase` key routes the conflict resolver, the Rebase step's only invocation, so it has no fix-round key of its own; nor does `document`, which has no fix round.
+The Rebase step invokes no agent, so the `rebase` key is accepted and routes nothing; it has no fix-round key, nor does `document`, which has no fix round.
 The `intent` key routes the intent summarizer and disambiguator, and `pr` the PR content and template calls.
 The `document` key also routes the combined document+lint housekeeping pass, because that pass runs in the Document step.
 `push` invokes no agent, and custom [gates](/no-mistakes/reference/repo-config/#gates) are not routed, so neither has a key.
@@ -567,7 +566,7 @@ Accepts any Go `time.ParseDuration` string: `30m`, `2h`, `4h30m`, etc.
 
 This is an idle timeout, not an absolute deadline: every time the base branch advances, the monitor re-arms it.
 So an actively-updated green PR keeps its monitor no matter how long it stays open.
-If it later develops an actual GitHub, GitLab, Forgejo, or Azure DevOps merge conflict, the CI auto-fix path rebases it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and publishes it through Push, while a clean behind PR needs no command.
+If it later develops an actual GitHub, GitLab, Forgejo, or Azure DevOps merge conflict, the CI auto-fix path merges the PR's base when it merges cleanly and publishes that as a fast-forward, or parks with each conflicted file named for you to merge by hand, while a clean behind PR needs no command.
 A genuinely idle/abandoned PR still parks at an approval gate after the timeout elapses.
 While that CI gate is parked, the daemon continues bounded read-only PR-state checks.
 If the PR is merged or closed externally, the stale gate completes automatically; an open, unknown, or temporarily unreachable PR remains parked for a user decision.
@@ -596,7 +595,7 @@ For older active runs that do not yet have activity rows, AXI falls back to the 
 ### agent_timeout
 
 Maximum wall-clock time for one pipeline agent invocation that does not already have a more specific deadline.
-This is the default-by-construction budget: Document, Lint, Rebase conflict repair, PR drafting, CI auto-fix, and any future agent-spawning step are bounded even if they forget to install their own timer.
+This is the default-by-construction budget: Document, Lint, PR drafting, CI auto-fix, and any future agent-spawning step are bounded even if they forget to install their own timer.
 Review still uses [`review_agent_timeout`](#review_agent_timeout) for each review or fix invocation, Test still uses [`test_agent_timeout`](#test_agent_timeout) per invocation, and Intent keeps its five-minute extraction cap; any existing deadline is honored rather than capped.
 When this deadline expires, the agent is cancelled and the invocation returns a timeout diagnostic instead of remaining active indefinitely. Most agent-driven mutation steps fail the run, CI auto-fix parks for a user decision, and PR drafting follows its existing agent-error fallback and continues with deterministic content. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the approval behavior.
 A late successful return after the deadline is rejected, so post-agent commits and PR content cannot use work from a timed-out turn.
@@ -618,7 +617,7 @@ Any substantive report from the agent adapter - for a native agent, its exit sta
 
 Accepts any positive Go `time.ParseDuration` string: `5m`, `30m`, `1h`, etc.
 Non-positive values are rejected when loading the global config.
-Raise it for repositories whose document, lint, rebase, PR, or CI-fix agent turns legitimately run long.
+Raise it for repositories whose document, lint, PR, or CI-fix agent turns legitimately run long.
 It is global-only: repository config and environment variables cannot override it.
 
 ### review_agent_timeout
@@ -780,7 +779,7 @@ For empty `commands.lint`, the document step's combined housekeeping pass also a
 
 | Field               | Type  | Default | Description                                                                                 |
 | ------------------- | ----- | ------- | ------------------------------------------------------------------------------------------- |
-| `auto_fix.rebase`   | `int` | `3`     | Rebase conflict auto-fix attempts                                                           |
+| `auto_fix.rebase`   | `int` | `3`     | Accepted and has no effect: every Rebase finding, a merge conflict included, is `ask-user`  |
 | `auto_fix.review`   | `int` | `0`     | Review finding auto-fix attempts                                                            |
 | `auto_fix.test`     | `int` | `3`     | Test failure auto-fix attempts                                                              |
 | `auto_fix.document` | `int` | `3`     | Not used by the automatic document pass                                                     |
@@ -830,19 +829,20 @@ A value in the trusted repository config overrides this global value in both dir
 
 ### rebase.strategy
 
-The operator-level default for [`rebase.strategy`](/no-mistakes/reference/repo-config/#rebasestrategy), whose per-repository reference owns the semantics, the trade-off, and the trust boundary.
+The operator-level copy of [`rebase.strategy`](/no-mistakes/reference/repo-config/#rebasestrategy), whose per-repository reference owns the semantics and the trust boundary.
 
 | | |
 |---|---|
-| Type | `string` (`rebase` or `merge`) |
-| Default | `rebase` |
+| Type | `string` (`merge`) |
+| Default | `merge` |
 
 ```yaml
 rebase:
   strategy: merge
 ```
 
-A value in the trusted repository config overrides this global value in both directions. When the trusted repository config omits the key, this global value applies. An unrecognized value fails the config closed rather than falling back to the default, so a typo cannot quietly keep rewriting history a maintainer asked to stop rewriting.
+`merge` is the only accepted value, so setting it changes nothing.
+`rebase` fails the config closed with a message saying the gate integrates a moved base only by merging, and any other value fails closed too rather than falling back to the default.
 
 ### commit.fix_message
 
@@ -943,7 +943,7 @@ Repositories matching no block keep existing global and built-in behavior.
 ### intent
 
 Transcript-based user-intent extraction settings.
-When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, and pass that summary to rebase, review, test, document, lint, CI auto-fix, repository gate repair, and PR prompts. For publication of the generated Intent section, see [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
+When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, and pass that summary to review, test, document, lint, CI auto-fix, repository gate repair, and PR prompts. For publication of the generated Intent section, see [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
 
 |      |          |
 | ---- | -------- |

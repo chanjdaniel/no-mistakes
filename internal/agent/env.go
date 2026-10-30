@@ -48,7 +48,7 @@ func (c subprocessContext) overlay() runenv.Overlay {
 
 // gitSafeEnv returns the environment for a spawned agent subprocess with git
 // forced into non-interactive mode. Agents shell out to git directly (for
-// example `git rebase --continue` during conflict resolution), which would
+// example `git commit` or `git merge` without `--no-edit`), which would
 // otherwise open $EDITOR and hang in the headless subprocess until the agent
 // times out.
 //

@@ -265,7 +265,8 @@ func ArchivedHeadRecorded(ctx context.Context, gateDir, branch, head string) boo
 
 // privateCommitsAbsentFromLive names private-only commits lacking matching
 // per-file patches, or the entire private-only range when final-tree survival
-// cannot be proven.
+// cannot be proven. A private-only merge that git.ContentFreeMergeInto proves
+// carries no content of its own needs no patch and is never named.
 //
 // The private side is computed first so the live scan can be bounded to the
 // paths the private commits actually touch. Comparison stops at the first
@@ -290,6 +291,13 @@ func privateCommitsAbsentFromLive(ctx context.Context, repoDir, liveHead, privat
 	privateCommits := make([]privateCommit, 0, len(privateOnly))
 	paths := make(map[string]bool)
 	for _, commit := range privateOnly {
+		// The gate's own merge of a base the live head also merged carries no
+		// content of its own, so there is nothing of it to prove present. Its
+		// parents are reachable from the live head, which also keeps every
+		// commit beneath them out of this private-only range.
+		if git.ContentFreeMergeInto(ctx, repoDir, commit, liveHead) {
+			continue
+		}
 		patches, comparable, err := perFilePatchIDs(ctx, repoDir, commit)
 		if err != nil {
 			return nil, err
@@ -401,7 +409,8 @@ func perFilePatchIDs(ctx context.Context, repoDir, commit string) ([]string, boo
 	parents := strings.Fields(parentLine)
 	if len(parents) > 2 {
 		// A merge's combined meaning is not safely represented by first-parent
-		// patches. It remains at risk unless direct ancestry proved containment.
+		// patches. It remains at risk unless direct ancestry proved containment
+		// or the caller proved it a content-free merge into the live head.
 		return nil, false, nil
 	}
 	parent := git.EmptyTreeSHA

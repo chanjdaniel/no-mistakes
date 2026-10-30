@@ -33,44 +33,29 @@ func gateRoute(step string) string {
 	return ""
 }
 
-const routingRebaseConflictMarker = "Resolve git rebase conflicts"
-
-// rebaseConflictTurn resolves setupGateConfigConflict's collision on
-// feature.txt by keeping both sides and finishing the rebase.
-const rebaseConflictTurn = `  - match: "` + routingRebaseConflictMarker + `"
-    text: "resolved the conflict"
-    edits:
-      - path: "feature.txt"
-        new: "main change\nseed for agent_model routing\n"
-    stage: ["feature.txt"]
-    git:
-      - ["-c", "core.editor=true", "rebase", "--continue"]
-    structured:
-      summary: "kept both sides"
-`
-
 // writeGateConfigScenario scripts a run through every agent invocation the
-// live gate makes: a rebase conflict the rebase fix round resolves, then
-// agentModelRoutingActions' review, test and lint fixes, then a CI build
-// that fails once and a CI fix round repairs.
+// live gate makes: agentModelRoutingActions' review, test and lint fixes,
+// then a CI build that fails once and a CI fix round repairs. The Rebase
+// step merges the moved base itself and never invokes an agent.
 func writeGateConfigScenario(t *testing.T) string {
 	t.Helper()
-	content := "actions:\n" + rebaseConflictTurn + ciFixTurn + agentModelRoutingActions +
+	content := "actions:\n" + ciFixTurn + agentModelRoutingActions +
 		"  -" + strings.TrimPrefix(cleanRoutingResponse, "   ")
 	return writeRoutingScenario(t, "gate-config-scenario.yaml", content)
 }
 
-// setupGateConfigConflict puts feature.txt on a collision course between the
-// branch and the moved base. The branch's diff stays that one file, so the
-// seeded transcript that touches it is intent's decisive match.
-func setupGateConfigConflict(t *testing.T, h *Harness, branch string) {
+// setupGateConfigMovedBase changes feature.txt on the branch and moves the
+// base under it with another file, so the Rebase step has a base to merge.
+// The branch's diff stays that one file, so the seeded transcript that touches
+// it is intent's decisive match.
+func setupGateConfigMovedBase(t *testing.T, h *Harness, branch string) {
 	t.Helper()
 	h.CommitChange("main", "feature.txt", "base\n", "add the feature file")
 	if out, err := h.runGit(t.Context(), h.WorkDir, "push", "origin", "main"); err != nil {
 		t.Fatalf("push feature base: %v\n%s", err, out)
 	}
 	h.CommitChange(branch, "feature.txt", "seed for agent_model routing\n", "change the feature for gate config routing")
-	advanceMain(t, h, "feature.txt", "main change\n", "change the feature on main")
+	advanceMain(t, h, "main-advance.txt", "main change\n", "move main under the branch")
 	h.Checkout(branch)
 }
 
@@ -84,7 +69,6 @@ func gateConfigTurn(inv Invocation) string {
 		{"document", routingHousekeepingMarker, "housekeeping"},
 		{"lint", routingLintFixMarker, "lint-fix"},
 		{"ci", routingCIFixMarker, "ci-fix"},
-		{"rebase", routingRebaseConflictMarker, "rebase-conflict"},
 	} {
 		if step == fix.step && strings.Contains(inv.Prompt, fix.needle) {
 			return fix.turn
@@ -96,7 +80,7 @@ func gateConfigTurn(inv Invocation) string {
 // TestAgentModelRoutesTheLiveGateConfigOnRealBinary loads the live gate's
 // routing keys (testdata/gate-config.yaml) through the real binary and drives
 // a Gitea-hosted run through every agent invocation the gate makes - the
-// intent summarizer, a rebase conflict, the review and its fix, two test
+// intent summarizer, the review and its fix, two test
 // passes around the test fix, the housekeeping pass and the lint fix, the PR
 // draft, and the CI repair - proving each invocation asked for, and was
 // served, the model the spec's routing table gives it.
@@ -117,17 +101,10 @@ func TestAgentModelRoutesTheLiveGateConfigOnRealBinary(t *testing.T) {
 	}
 
 	const branch = "feature/gate-config-routing"
-	setupGateConfigConflict(t, h, branch)
+	setupGateConfigMovedBase(t, h, branch)
 	h.PushToGate(branch)
 
-	// A rebase conflict carries no auto-fix action, so it parks for a human
-	// whatever auto_fix.rebase allows.
-	gated := waitForStepStatus(t, h, branch, types.StepRebase, types.StepStatusAwaitingApproval, 90*time.Second)
-	if gated == nil {
-		t.Fatal("run did not park at the rebase conflict gate")
-	}
-	h.Respond(gated.ID, types.StepRebase, types.ActionFix)
-	gated = waitForStepStatus(t, h, branch, types.StepReview, types.StepStatusAwaitingApproval, 120*time.Second)
+	gated := waitForStepStatus(t, h, branch, types.StepReview, types.StepStatusAwaitingApproval, 120*time.Second)
 	if gated == nil {
 		t.Fatal("run did not park at the review gate")
 	}
@@ -156,18 +133,21 @@ func TestAgentModelRoutesTheLiveGateConfigOnRealBinary(t *testing.T) {
 		t.Logf("%-15s asked for model %q", turn, inv.Model)
 	}
 	for turn, min := range map[string]int{
-		"intent": 1, "rebase-conflict": 1, "review": 2, "review-fix": 1, "test": 2, "test-fix": 1,
+		"intent": 1, "review": 2, "review-fix": 1, "test": 2, "test-fix": 1,
 		"housekeeping": 1, "lint-fix": 1, "pr": 1, "ci-fix": 1,
 	} {
 		if turns[turn] < min {
 			t.Errorf("%s turns = %d, want at least %d (turns: %v)", turn, turns[turn], min, turns)
 		}
 	}
+	if turns["rebase"] != 0 {
+		t.Errorf("the Rebase step invoked an agent %d time(s); it only ever merges", turns["rebase"])
+	}
 	assertOneCIFixRow(t, h, run.ID)
 	assertServedModels(t, h, run.ID, func(row db.AgentInvocation) string { return gateRoute(row.StepName) })
 
 	for _, step := range []types.StepName{
-		types.StepIntent, types.StepRebase, types.StepReview, types.StepTest,
+		types.StepIntent, types.StepReview, types.StepTest,
 		types.StepDocument, types.StepLint, types.StepPR, types.StepCI,
 	} {
 		want := "no agent_model override configured for step " + string(step) + "; running on agent default"

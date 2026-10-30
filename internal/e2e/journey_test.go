@@ -280,8 +280,7 @@ func runHappyPath(t *testing.T, agentName string) {
 	assertPromptsAbsent(t, invs,
 		"Draft a pull request title and summary for the full branch delta.",
 		"The following CI checks have failed on this PR. Diagnose and fix the issues.",
-		"The PR has merge conflicts with the base branch. Rebase onto the base branch and resolve the merge conflicts.",
-		"The following CI checks have failed and the PR has merge conflicts with the base branch. Diagnose and fix the CI issues, then rebase onto the base branch and resolve the merge conflicts.",
+		"Address the following findings selected at the CI gate of this PR.",
 	)
 
 	assertPushedHead(t, run.HeadSHA, h.UpstreamBranchSHA("feature/e2e"))
@@ -1236,7 +1235,10 @@ func assertNonEmptyDiffAfterRebaseRun(t *testing.T, h *Harness) {
 		t.Fatalf("non-empty-after-rebase run did not complete: status=%s error=%v", run.Status, deref(run.Error))
 	}
 	if run.HeadSHA == branchHead {
-		t.Fatalf("expected rebase to rewrite head SHA, still %s", run.HeadSHA)
+		t.Fatalf("expected the moved base to be merged, head still %s", run.HeadSHA)
+	}
+	if !isAncestorIn(t, h, h.UpstreamDir, branchHead, run.HeadSHA) {
+		t.Fatalf("published head %s does not keep the submitted head %s: the base was not merged", run.HeadSHA, branchHead)
 	}
 	mergeBase, err := h.runGit(ctx, h.UpstreamDir, "merge-base", "refs/heads/non-empty-after-rebase", "refs/heads/main")
 	if err != nil {

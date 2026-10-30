@@ -28,72 +28,78 @@ func resolveRebaseStrategy(t *testing.T, globalYAML, trustedRepoYAML, pushedRepo
 // unset is an empty YAML document: the loaders reject a zero-byte one.
 const unsetRebaseYAML = "{}\n"
 
-func TestRebaseStrategy_DefaultsToRebase(t *testing.T) {
+const (
+	mergeStrategyYAML  = "rebase:\n  strategy: merge\n"
+	rebaseStrategyYAML = "rebase:\n  strategy: rebase\n"
+)
+
+func TestRebaseStrategy_DefaultsToMerge(t *testing.T) {
 	t.Parallel()
 	const unset = unsetRebaseYAML
-	if got := resolveRebaseStrategy(t, unset, unset, unset); got != RebaseStrategyRebase {
-		t.Fatalf("Rebase.Strategy = %q, want %q for an unset config", got, RebaseStrategyRebase)
+	if got := resolveRebaseStrategy(t, unset, unset, unset); got != RebaseStrategyMerge {
+		t.Fatalf("Rebase.Strategy = %q, want %q for an unset config", got, RebaseStrategyMerge)
 	}
 }
 
-func TestRebaseStrategy_GlobalAndProjectPrecedence(t *testing.T) {
+// merge is the only shape, so writing it down anywhere resolves to it.
+func TestRebaseStrategy_ExplicitMergeIsAccepted(t *testing.T) {
 	t.Parallel()
 	const unset = unsetRebaseYAML
-	const merge = "rebase:\n  strategy: merge\n"
-	const rebase = "rebase:\n  strategy: rebase\n"
-
 	for _, tc := range []struct {
-		name            string
-		global, trusted string
-		want            string
-		why             string
+		name                    string
+		global, trusted, pushed string
 	}{
-		{"global only", merge, unset, RebaseStrategyMerge, "the operator's machine-wide default applies"},
-		{"repo only", unset, merge, RebaseStrategyMerge, "a repository can select the merge shape on its own"},
-		{"repo overrides global", merge, rebase, RebaseStrategyRebase, "the maintainer of the repository has the last word"},
-		{"repo opts in over global rebase", rebase, merge, RebaseStrategyMerge, "an explicit repo value wins in both directions"},
+		{"global", mergeStrategyYAML, unset, unset},
+		{"trusted repo", unset, mergeStrategyYAML, unset},
+		{"pushed branch", unset, unset, mergeStrategyYAML},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := resolveRebaseStrategy(t, tc.global, tc.trusted, unset); got != tc.want {
-				t.Fatalf("Rebase.Strategy = %q, want %q: %s", got, tc.want, tc.why)
+			if got := resolveRebaseStrategy(t, tc.global, tc.trusted, tc.pushed); got != RebaseStrategyMerge {
+				t.Fatalf("Rebase.Strategy = %q, want %q", got, RebaseStrategyMerge)
 			}
 		})
 	}
 }
 
-// rebase.strategy decides whether integrating a moved base leaves an auditable
-// merge commit behind, so a pushed branch must not be able to change it in
-// either direction.
-func TestRebaseStrategy_TrustedOnly(t *testing.T) {
+// The rewriting shape is retired, not ignored: a config that still asks for it
+// fails closed with a message saying why, so no repository silently runs on a
+// behaviour it did not ask for.
+func TestRebaseStrategy_RebaseFailsClosed(t *testing.T) {
 	t.Parallel()
-	const unset = unsetRebaseYAML
-	const merge = "rebase:\n  strategy: merge\n"
-	const rebase = "rebase:\n  strategy: rebase\n"
-
-	if got := resolveRebaseStrategy(t, unset, merge, rebase); got != RebaseStrategyMerge {
-		t.Fatalf("Rebase.Strategy = %q, want %q: a pushed branch must not opt out of the trusted merge shape", got, RebaseStrategyMerge)
+	wantRetired := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected rebase.strategy: rebase to fail the config closed")
+		}
+		for _, want := range []string{"rebase.strategy", `"rebase"`, "only by merging"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q is missing %q", err, want)
+			}
+		}
 	}
-	if got := resolveRebaseStrategy(t, unset, unset, merge); got != RebaseStrategyRebase {
-		t.Fatalf("Rebase.Strategy = %q, want %q: a pushed branch must not select the shape on its own", got, RebaseStrategyRebase)
-	}
+	_, err := LoadRepoFromBytes([]byte(rebaseStrategyYAML))
+	wantRetired(t, err)
+	_, err = LoadGlobalFromBytes([]byte(rebaseStrategyYAML))
+	wantRetired(t, err)
 }
 
-func TestRebaseStrategy_TrustedOnlyEvenWithRepoCommandsOptIn(t *testing.T) {
+// rebase.strategy stays trusted-only: a pushed branch's copy never reaches the
+// resolved config, even with the commands opt-in, and an empty trusted copy
+// resolves to the default rather than to anything the branch said.
+func TestRebaseStrategy_TrustedOnly(t *testing.T) {
 	t.Parallel()
-	global, err := LoadGlobalFromBytes([]byte("{}\n"))
+	trusted, err := LoadRepoFromBytes([]byte("allow_repo_commands: true\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	trusted, err := LoadRepoFromBytes([]byte("allow_repo_commands: true\nrebase:\n  strategy: merge\n"))
+	pushed, err := LoadRepoFromBytes([]byte(mergeStrategyYAML))
 	if err != nil {
 		t.Fatal(err)
 	}
-	pushed, err := LoadRepoFromBytes([]byte("rebase:\n  strategy: rebase\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := Merge(global, EffectiveRepoConfig(pushed, trusted, true)).Rebase.Strategy; got != RebaseStrategyMerge {
-		t.Fatalf("Rebase.Strategy = %q, want %q: the commands opt-in covers what a branch runs, not the shape of its integration", got, RebaseStrategyMerge)
+	for _, allowRepoCommands := range []bool{false, true} {
+		if got := EffectiveRepoConfig(pushed, trusted, allowRepoCommands).Rebase.Strategy; got != "" {
+			t.Fatalf("allow_repo_commands=%v: effective repo rebase.strategy = %q, want the pushed copy dropped", allowRepoCommands, got)
+		}
 	}
 }
 
@@ -113,7 +119,7 @@ func TestRebaseStrategy_RejectsUnknownValue(t *testing.T) {
 // the value out cannot silently invent behavior.
 func TestRebaseStrategy_EmptyValueKeepsTheDefault(t *testing.T) {
 	t.Parallel()
-	if got := resolveRebaseStrategy(t, "rebase:\n  strategy: \"\"\n", unsetRebaseYAML, unsetRebaseYAML); got != RebaseStrategyRebase {
-		t.Fatalf("Rebase.Strategy = %q, want %q for an empty value", got, RebaseStrategyRebase)
+	if got := resolveRebaseStrategy(t, "rebase:\n  strategy: \"\"\n", unsetRebaseYAML, unsetRebaseYAML); got != RebaseStrategyMerge {
+		t.Fatalf("Rebase.Strategy = %q, want %q for an empty value", got, RebaseStrategyMerge)
 	}
 }

@@ -39,7 +39,7 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 | # | Step | What it does | Default auto-fix limit |
 |---|---|---|---|
 | 1 | **Intent** | Use supplied intent or infer it from recent local agent transcripts | n/a |
-| 2 | **Rebase** | Fetch fresh remote upstream and the configured branch target, then rebase your branch onto them | `3` |
+| 2 | **Rebase** | Fetch fresh remote upstream and the configured branch target, then merge them into your branch (never a rebase) | n/a (a conflict parks for you) |
 | 3 | **Review** | AI code review of your diff | `0` (requires approval) |
 | 4 | **Test** | Targeted local validation of the change and intent (not a full CI suite), plus evidence when intent is available | `3` |
 | 5 | **Document** | Update docs when needed and report unresolved gaps | initial pass |
@@ -53,13 +53,14 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 - **Intent first** so downstream agent prompts and generated PR descriptions can include author intent supplied by the agent or inferred from transcripts.
 - **Rebase next** so everything else runs against the latest upstream and pushed-branch target.
   It also stops when the branch would silently bundle commits from a local default branch that were never pushed to `origin/<default_branch>`.
-  If there's no diff left after the rebase, the pipeline skips the rest.
+  If there's no diff left after the merge, the pipeline skips the rest.
 - **Review before test** so the agent reads fresh code, not code it may have touched during fixes.
   A later run's initial review also receives fix-round provenance for any uncertified pipeline-authored commits left on the branch when a previous run's re-review did not complete.
 - **Document after test** so docs are updated against code that's known to work.
 - **Lint last among local checks** so it doesn't churn over code that may still change.
 - **Push → PR → CI** happens after all local checks pass.
-  CI publishes a repair through the Push step's guarded path and keeps monitoring only when it can prove the repair descends from the reviewed head; otherwise the repair revalidates from Review before Push republishes it, which is what a merge-conflict repair always does. [`ci.revalidate_repairs`](/no-mistakes/reference/repo-config/#cirevalidate_repairs) sets that intent: `false` (default) publishes when it is provable, `true` revalidates every repair.
+  CI publishes a repair through the Push step's guarded path and keeps monitoring only when it can prove the repair descends from the reviewed head; otherwise the repair revalidates from Review before Push republishes it.
+  A merge-conflict repair is a merge of the PR's base whose first parent is the reviewed head, so it publishes the same way, and a base that conflicts parks for you instead. [`ci.revalidate_repairs`](/no-mistakes/reference/repo-config/#cirevalidate_repairs) sets that intent: `false` (default) publishes when it is provable, `true` revalidates every repair.
   CI owns remote validation after publication. A repository gate command still runs before Push, although the command itself may contact an external service.
 
 ## What core steps can do

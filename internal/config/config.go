@@ -29,7 +29,7 @@ import (
 // CITimeout is interpreted by the CI step as the maximum time to babysit an
 // open PR with no base-branch movement before giving up. The monitor re-arms
 // this timer every time the base branch advances (see internal/pipeline/steps
-// ci.go), so an actively-rebased PR keeps its monitor. The value is
+// ci.go), so a PR whose base keeps moving keeps its monitor. The value is
 // deliberately long because a green PR can legitimately wait days on a
 // dependency PR or on review; a torn-down or abandoned run is reaped
 // explicitly via `no-mistakes axi abort --run <id>` rather than by a short
@@ -94,24 +94,18 @@ const (
 	// False does not mean "always publish". It means "publish when it is
 	// provably safe to": a repair is published only when its head is the run's
 	// review-approved commit or a descendant of it, and any repair that cannot
-	// show that - every merge-conflict repair, since a rebase rewrites the
-	// head - revalidates from Review instead. See CI.RevalidateRepairs.
+	// show that revalidates from Review instead. See CI.RevalidateRepairs.
 	DefaultCIRevalidateRepairs = false
-	// RebaseStrategyRebase replays the branch on top of the moved base. It is
-	// the historical behavior and the default.
-	RebaseStrategyRebase = "rebase"
-	// RebaseStrategyMerge integrates the moved base with a merge commit whose
-	// first parent is the branch head the pipeline reviewed.
+	// RebaseStrategyMerge integrates a moved base with a merge commit whose
+	// first parent is the branch head the pipeline reviewed. It is the only
+	// accepted value: the fork never rewrites a branch's published commits.
 	RebaseStrategyMerge = "merge"
+	// retiredRebaseStrategy is the rewriting shape this fork no longer offers.
+	// It is named only so the config can refuse it with a message saying why.
+	retiredRebaseStrategy = "rebase"
 	// DefaultRebaseStrategy is how the rebase step integrates a base branch
 	// that moved under the gated branch when rebase.strategy is unset.
-	//
-	// It is "rebase" because that is what every existing installation already
-	// does: the merge shape changes the commits a run publishes, so it is an
-	// explicit opt-in rather than something a version bump turns on under a
-	// repository that never asked for it. See Rebase.Strategy for what the
-	// merge shape buys.
-	DefaultRebaseStrategy = RebaseStrategyRebase
+	DefaultRebaseStrategy = RebaseStrategyMerge
 	// DefaultEvalMaxCases caps the auto-captured local eval corpus. Cases
 	// share one object pool per repository, so the marginal cost of a case is
 	// its JSON records plus the objects its commits actually introduced, not a
@@ -631,10 +625,8 @@ type CI struct {
 	// succeeds - and the CI monitor keeps watching the same run for the new
 	// head. The run's review approval stays valid because the repair descends
 	// from the approved head. A repair whose continuity cannot be proven takes
-	// the revalidating path below instead; a merge-conflict repair always does,
-	// because a rebase makes its head a non-descendant and resolving a conflict
-	// changes the commit's patch-id, so no content-based guard can tell a
-	// resolved rebase from one that dropped the work.
+	// the revalidating path below instead. A merge-conflict repair is a merge
+	// commit whose first parent is the reviewed head, so it is provable.
 	//
 	// true: the repair is kept local, the run's review approval is revoked,
 	// and the pipeline restarts at Review so the repaired head re-passes
@@ -651,28 +643,18 @@ type RebaseRaw struct {
 
 // Rebase holds the resolved rebase-step settings.
 type Rebase struct {
-	// Strategy selects how the rebase step integrates a base branch that moved
-	// under the gated branch.
-	//
-	// "rebase" (default): replay the branch's commits on top of the new base.
-	// Every branch commit is rewritten, so the reviewed head no longer exists
-	// on the branch, publication needs a force push that rewrites an open PR's
-	// head, and the resolution of any conflict leaves no evidence behind - the
-	// result is just commits, with nothing to compare the two sides against.
-	//
-	// "merge": integrate the base with a `git merge --no-ff` commit whose FIRST
-	// parent is the head the pipeline reviewed. Three things follow. The
-	// reviewed head stays an ancestor, so the CI step's continuity rule
+	// Strategy names how the rebase step integrates a base branch that moved
+	// under the gated branch, and "merge" is its only value: a `git merge
+	// --no-ff` commit whose FIRST parent is the head the pipeline reviewed.
+	// The reviewed head stays an ancestor, so the CI step's continuity rule
 	// (see CI.RevalidateRepairs) is satisfied by ancestry rather than by a
-	// content guess. Publication is a fast-forward, so an open PR's head is
+	// content guess, and publication is a fast-forward, so an open PR's head is
 	// appended to rather than rewritten and a review attestation bound to an
-	// exact SHA survives. And the merge commit keeps both parents, so whether a
-	// conflict resolution deleted content one side introduced stays decidable
-	// afterwards, by anything, from outside the pipeline. The conflict
-	// resolver is told to resolve additively to match.
+	// exact SHA survives. A merge that conflicts is never resolved by the
+	// pipeline: the step parks for the operator to merge by hand.
 	//
-	// The cost is a merge commit per integration. On a squash-merged default
-	// branch they never reach it; on a merge-committed one they do.
+	// The key keeps parsing so an existing config that says "merge" still
+	// loads, and "rebase" fails closed (validateRebaseRaw).
 	Strategy string
 }
 
@@ -1133,8 +1115,8 @@ forgejo_axi_path: forgejo-axi
 #   devin: devin acp
 
 # Maximum time the CI monitor babysits an open PR with no base-branch movement
-# before giving up. The monitor watches CI and auto-rebases when the base branch
-# advances; each base advance re-arms this timer, so an actively-updated green PR
+# before giving up. The monitor watches CI and the PR's mergeability; each
+# base-branch advance re-arms this timer, so an actively-updated green PR
 # keeps its monitor. Set to "unlimited", "none", "off", "never", or any
 # non-positive duration to monitor until the PR is merged, closed, or the run is
 # aborted with: no-mistakes axi abort --run <id>
@@ -1146,7 +1128,7 @@ ci_timeout: "168h"
 step_quiet_warning: "10m"
 
 # Maximum wall-clock time for one pipeline agent invocation that does not
-# install a more specific deadline (document, lint, rebase, PR, CI-fix, and
+# install a more specific deadline (document, lint, PR, CI-fix, and
 # auto-fix). A stalled agent fails the run instead of leaving it active.
 agent_timeout: "30m"
 
@@ -1242,7 +1224,7 @@ log_level: info
 # Maximum follow-up auto-fix attempts per step (0 = disabled after the initial pass)
 # Document fixes are attempted during the initial document pass.
 auto_fix:
-  rebase: 3
+  rebase: 3 # accepted and has no effect: every Rebase finding is ask-user
   lint: 3
   test: 3
   review: 0
@@ -1264,8 +1246,9 @@ ci:
   # be proven. Defaults to false: a repair that descends from the reviewed head
   # is published through the same guarded push path the Push step uses and
   # CI keeps monitoring, so one repair costs one agent round. A repair that
-  # cannot show that ancestry revalidates from Review anyway - a merge-conflict
-  # repair always does, because rebasing rewrites the head. Set true to restart
+  # cannot show that ancestry revalidates from Review anyway. A merge-conflict
+  # repair merges the PR's base onto the reviewed head, so it descends from it
+  # and publishes the same way. Set true to restart
   # validation at Review for every repair - safer, and it pays for another full
   # pipeline pass in wall clock and tokens every time CI is repaired. A
   # repository that sets ci.revalidate_repairs on its own default branch
@@ -2654,13 +2637,11 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// before it is published, so a pushed branch must not be able to turn
 		// the maintainer's revalidation requirement off for its own repairs.
 		effective.CI = trusted.CI
-		// rebase.strategy is gate-control in the same sense no_ci is. It decides
-		// whether integrating a moved base leaves an auditable merge commit
-		// behind - two parents a resolution can be checked against afterwards -
-		// or rewrites the branch and leaves nothing. A pushed branch must not be
-		// able to opt its own integration out of the shape the maintainer chose,
-		// in either direction, so it is trusted-only regardless of
-		// allow_repo_commands.
+		// rebase.strategy is gate-control in the same sense no_ci is: it names
+		// the shape integrating a moved base takes. merge is its only accepted
+		// value today, and the key keeps its trusted-only boundary regardless
+		// of allow_repo_commands so a pushed branch can never select the shape
+		// of its own integration.
 		effective.Rebase = trusted.Rebase
 		// test.evidence.branch names the git ref evidence commits are pushed
 		// to with the maintainer's credentials. It is trusted-only so a pushed
@@ -2997,15 +2978,18 @@ func applyRebaseOverrides(dst *Rebase, src *RebaseRaw) {
 	}
 }
 
-// validateRebaseRaw fails the config closed on an unrecognized rebase.strategy.
-// Silently falling back to the default would let a typo ("merges") quietly keep
-// rewriting history a maintainer asked to stop rewriting.
+// validateRebaseRaw fails the config closed on any rebase.strategy but merge.
+// Silently falling back to the default would let a config that asks for the
+// retired rewriting shape, or a typo ("merges"), run on a behaviour nobody
+// chose.
 func validateRebaseRaw(r RebaseRaw) error {
-	switch strings.TrimSpace(r.Strategy) {
-	case "", RebaseStrategyRebase, RebaseStrategyMerge:
+	switch v := strings.TrimSpace(r.Strategy); v {
+	case "", RebaseStrategyMerge:
 		return nil
+	case retiredRebaseStrategy:
+		return fmt.Errorf("rebase.strategy: %q is no longer supported: the gate integrates a moved base only by merging (set %q or remove the key)", r.Strategy, RebaseStrategyMerge)
 	}
-	return fmt.Errorf("rebase.strategy: %q is not a valid strategy (want %q or %q)", r.Strategy, RebaseStrategyRebase, RebaseStrategyMerge)
+	return fmt.Errorf("rebase.strategy: %q is not a valid strategy (want %q)", r.Strategy, RebaseStrategyMerge)
 }
 
 // applyCIOverrides applies non-nil raw values onto resolved defaults, clamping

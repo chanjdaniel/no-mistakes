@@ -29,9 +29,8 @@ var errCIAttestationUnsettled = errors.New("CI repair attestation is unsettled")
 // propagates whatever publishRunHead returns.
 var errAttestationWriteFailed = errors.New("pipeline attestation write failed")
 
-// ciFixerClassRules is shared by every CI-repair prompt path so failing-check,
-// combined, and merge-conflict-only repairs follow the Review fixer's same
-// invariant-complete discipline.
+// ciFixerClassRules carries the Review fixer's invariant-complete discipline
+// into every CI repair prompt.
 const ciFixerClassRules = `- Before changing code, state for each finding the invariant it violates (what must always hold, in one sentence) and enumerate every place in the changed area where that same invariant must hold: every axis, direction, and representation; every sibling call path, command, action, and state transition; every consumer of the same input, field, or record. Fix the invariant at all of those places in this round, with the same small correction, or at the one shared boundary that makes all of them hold. A fix that closes only the reported site and leaves a sibling site reachable is incomplete; the next review will report the sibling.
 - Do not grow the fix into machinery: closing sibling sites with the same small edit, or moving a check to one shared boundary, is the fix; adding handling, state, fallbacks, retries, or a subsystem to manage symptoms is not. Prefer addressing a deeper architectural reason and simplifying it, than introducing machinery to handle the symptoms.
 - After applying the fixes and before verification, re-trace for each finding the concrete failing sequence it describes through the code as it now is, and trace the ordinary successful path through every function you changed, including each of its callers. Remove any alias, branch, parameter, or helper your fix made unreachable. A fix that makes the reported sequence pass while breaking the ordinary path, a caller's assumption, or a sibling site is a regression the next review will report.`
@@ -45,11 +44,6 @@ const ciFailingCheckFixRules = `- If a failing check is caused by this PR's code
 		- Do not add new subsystems, guards, instructions, or behaviors beyond what the specific failing check requires.
 		- Do not refactor beyond what is needed for that root-cause fix.
 		- Verify the fix by running the most relevant commands locally before finishing.`
-
-const ciMergeConflictFixRules = `- Resolve the merge conflicts by applying the minimal necessary changes.
-		- Do not make unrelated file edits.
-` + ciFixerClassRules + `
-		- Verify the rebase completes cleanly before finishing.`
 
 // repairFromFindings runs one CI fix round over the findings the executor
 // selected for it (sctx.PreviousFindings): the auto-fix subset of the last
@@ -115,6 +109,14 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 		sctx.Log(fmt.Sprintf("warning: CI fix failed: %v", err))
 		return nil, nil
 	}
+	if len(repair.Conflicts.Items) > 0 {
+		// The base does not merge cleanly, and the gate never resolves a
+		// conflict: the branch is as it was, no agent ran, and every selected
+		// finding waits with the conflicted files for the operator's merge.
+		sctx.Log(fmt.Sprintf("%s; merge it into your branch locally, resolve, and push", repair.Conflicts.Summary))
+		encoded, _ := json.Marshal(repair.Conflicts)
+		return ciTerminalRepairOutcome(&pipeline.StepOutcome{Findings: string(encoded)}, targets.Findings, sctx.DeferredFindings), nil
+	}
 	if repair.HeadAdvanced || sctx.Run.HeadSHA != previousHeadSHA {
 		s.lastFixedChecks = fixKey
 		s.lastFixedCompletedAt = fixCompletedAt
@@ -151,17 +153,22 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	return nil, nil
 }
 
-// autoFixCI runs the agent to fix CI failures and/or merge conflicts, then
-// records the repair under the run's uniform continuity rule: published
-// immediately through the guarded push path when its continuity with the
-// reviewed head is provable, held for revalidation when it is not or when
-// ci.revalidate_repairs asks for it outright. See recordRepair.
+// autoFixCI repairs the selected findings, then records the repair under the
+// run's uniform continuity rule: published immediately through the guarded
+// push path when its continuity with the reviewed head is provable, held for
+// revalidation when it is not or when ci.revalidate_repairs asks for it
+// outright. See recordRepair.
+//
+// A selected merge conflict is repaired first and deterministically, by
+// merging the PR's base (mergePRBase); no agent ever sees it. A base that
+// conflicts ends the round before any agent runs, with the branch unchanged
+// and the conflicted files in the result. A clean merge is followed by the
+// agent's repair of whatever else was selected, on the merged head.
 // The result reports whether the recorded head advanced and whether the repair
-// must revalidate; a zero result means the agent produced no changes.
+// must revalidate; a zero result means the round produced no changes.
 func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, targets ciFixTargets) (ciRepairResult, error) {
 	ctx := sctx.Ctx
 	failingNames := targets.checkNames()
-	mergeConflict := targets.MergeConflict
 	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 		return ciRepairResult{}, err
 	}
@@ -170,14 +177,50 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	if pr != nil && strings.TrimSpace(pr.BaseBranch) != "" {
 		baseBranch = strings.TrimSpace(pr.BaseBranch)
 	}
+	// mergedBase names the base only when this round actually merged it; a
+	// base the head already contains merges nothing.
+	mergedBase := ""
+	if targets.MergeConflict {
+		preMerge, err := stepGitHeadSHA(sctx)
+		if err != nil {
+			return ciRepairResult{}, fmt.Errorf("resolve head before merging the PR base: %w", err)
+		}
+		label, conflicts, err := mergePRBase(sctx, baseBranch)
+		if err != nil {
+			return ciRepairResult{}, err
+		}
+		if len(conflicts) > 0 {
+			result := ciRepairResult{Conflicts: Findings{Summary: "conflict merging " + label}}
+			for _, file := range conflicts {
+				finding := mergeConflictFinding(label, file)
+				// A human's fix at this gate re-runs the same merge.
+				finding.Category = types.FindingCategoryCIMergeConflict
+				result.Conflicts.Items = append(result.Conflicts.Items, finding)
+			}
+			return result, nil
+		}
+		if head, err := stepGitHeadSHA(sctx); err != nil {
+			return ciRepairResult{}, fmt.Errorf("resolve head after merging the PR base: %w", err)
+		} else if head != preMerge {
+			mergedBase = label
+		}
+	}
+	agentFindings := targets.agentFindings()
+	if len(agentFindings.Items) == 0 {
+		// The merge was the whole repair.
+		repair, err := s.commitRepair(sctx, "")
+		if err == nil && repair.HeadAdvanced && mergedBase != "" {
+			repair.Summary = "merge " + mergedBase
+		}
+		return repair, err
+	}
 	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
 	if err != nil {
 		return ciRepairResult{}, err
 	}
-	rebaseBaseSHA := resolveRunDefaultBranchTipSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
-	promptBaseSHA := baseSHA
-	if mergeConflict {
-		promptBaseSHA = rebaseBaseSHA
+	targetSHA, err := stepGitHeadSHA(sctx)
+	if err != nil {
+		return ciRepairResult{}, fmt.Errorf("resolve head before CI repair: %w", err)
 	}
 
 	const maxLogBytes = 32 * 1024
@@ -186,22 +229,12 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 		logOutput = fetchCILogOutput(ctx, host, pr, sctx.Run.Branch, sctx.Run.HeadSHA, targets.Checks, maxLogBytes)
 	}
 
-	// Build prompt based on what issues are present
-	var promptIntro string
-	var promptRules string
-	switch {
-	case len(failingNames) > 0 && mergeConflict:
-		promptIntro = "The following CI checks have failed and the PR has merge conflicts with the base branch. Diagnose and fix the CI issues, then rebase onto the base branch and resolve the merge conflicts."
-		promptRules = ciFailingCheckFixRules
-	case mergeConflict:
-		promptIntro = "The PR has merge conflicts with the base branch. Rebase onto the base branch and resolve the merge conflicts."
-		promptRules = ciMergeConflictFixRules
-	case len(failingNames) == 0:
+	promptIntro := "The following CI checks have failed on this PR. Diagnose and fix the issues."
+	if len(failingNames) == 0 {
 		promptIntro = "Address the following findings selected at the CI gate of this PR."
-		promptRules = ciFailingCheckFixRules
-	default:
-		promptIntro = "The following CI checks have failed on this PR. Diagnose and fix the issues."
-		promptRules = ciFailingCheckFixRules
+	}
+	if mergedBase != "" {
+		promptIntro += fmt.Sprintf(" The PR's base branch (%s) has already been merged into this branch; the target commit is that merge.", mergedBase)
 	}
 
 	prompt := fmt.Sprintf(
@@ -213,31 +246,24 @@ Context:
 - target commit: %s
 - PR number: %s
 - failing checks: %s
-- merge conflict: %v
 
 		Rules:
 		%s`,
 		promptIntro,
 		sctx.Run.Branch,
-		promptBaseSHA,
-		sctx.Run.HeadSHA,
+		baseSHA,
+		targetSHA,
 		pr.Number,
 		strings.Join(failingNames, ", "),
-		mergeConflict,
-		promptRules,
+		ciFailingCheckFixRules,
 	)
-	if mergeConflict {
-		prompt += fmt.Sprintf("\n- rebase target commit: %s", rebaseBaseSHA)
-	}
 	if logOutput != "" {
 		prompt += fmt.Sprintf(`
 
 CI logs:
 %s`, logOutput)
 	}
-	if len(targets.Findings.Items) > 0 {
-		prompt += ciSelectedFindingsPrompt(targets.Findings)
-	}
+	prompt += ciSelectedFindingsPrompt(agentFindings)
 	// Recorded human decisions, before the user intent and in the same order
 	// every other fix-capable step composes them. The intent is frozen at run
 	// start, so it always predates any decision a human made at a later gate;
@@ -249,7 +275,7 @@ CI logs:
 	prompt += roundHistoryPromptSection(sctx)
 	prompt += userIntentPromptSection(sctx)
 	prompt += executionContextPromptSection(sctx.WorkDir)
-	prompt = fixerPrompt(testguidance.LateRepairPrompt(string(s.Name()), prompt))
+	prompt = fixerPrompt(testguidance.LateRepairPrompt(prompt))
 
 	sctx.Log("running agent to fix CI issues...")
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
@@ -283,11 +309,34 @@ CI logs:
 		repair.Summary = conclusion.Summary
 		return repair, nil
 	}
-	if !mergeConflict && conclusion.CodeChangeNeeded != nil && !*conclusion.CodeChangeNeeded {
+	if conclusion.CodeChangeNeeded != nil && !*conclusion.CodeChangeNeeded {
 		repair.NoCodeChangeNeeded = true
 		repair.Summary = conclusion.Summary
 	}
 	return repair, nil
+}
+
+// mergePRBase brings the PR's base branch into the run worktree through the
+// pipeline's one integration path, mergeIntoWorktree: it fetches the base,
+// resolves its tip to the SHA it then merges, so the commit merged is exactly
+// the one observed, and returns the label it merged under ("origin/main").
+// A base that conflicts returns its conflicted files with the worktree verified
+// back on the head it started from.
+func mergePRBase(sctx *pipeline.StepContext, baseBranch string) (string, []string, error) {
+	if strings.TrimSpace(baseBranch) == "" {
+		return "", nil, errors.New("merge the PR base: the PR's base branch is unknown")
+	}
+	if err := fetchRunUpstreamBranch(sctx.Ctx, sctx, baseBranch); err != nil {
+		return "", nil, fmt.Errorf("fetch base branch %q before merging it: %w", baseBranch, err)
+	}
+	run := func(args ...string) (string, error) { return stepGitRun(sctx, args...) }
+	label := "origin/" + baseBranch
+	tip, err := run("rev-parse", "--verify", label+"^{commit}")
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve %s: %w", label, err)
+	}
+	conflicts, err := mergeIntoWorktree(sctx, run, tip, label)
+	return label, conflicts, err
 }
 
 func fetchCILogOutput(ctx context.Context, host scm.Host, pr *scm.PR, branch, headSHA string, targets []scm.CheckTarget, maxBytes int) string {
@@ -548,6 +597,9 @@ type ciRepairResult struct {
 	Revalidate         bool
 	NoCodeChangeNeeded bool
 	Summary            string
+	// Conflicts holds one ask-user finding per file the PR's base conflicted
+	// in, when it did; the branch is unchanged and no agent ran.
+	Conflicts Findings
 }
 
 // commitAndPush remains as the narrow test seam for the default summary.
@@ -668,14 +720,12 @@ func ciRepairPolicyDescription(sctx *pipeline.StepContext) string {
 //
 // ci.revalidate_repairs governs intent identically on every path: true asks for
 // revalidation outright, false asks to publish when it is safe to do so. Merge
-// conflict repairs are not carved out - they simply always land in the
-// cannot-be-proven half, because a rebase makes the repaired head a
-// non-descendant of the reviewed head, resolving a conflict changes the
-// commit's patch-id, and no content-based guard can separate "rebased and
-// resolved" from "dropped the work". Provenance cannot stand in for that proof
-// either: the repair that deleted a reviewed commit in the reproduction behind
-// this rule was authored by the CI repair agent itself. Who wrote the repair
-// says nothing about what it did to the reviewed commits.
+// conflict repairs are not carved out either: a clean merge of the base has the
+// reviewed head as its first parent, so it lands in the proven half by the same
+// ancestry test as any other repair. Provenance cannot stand in for that proof:
+// the repair that deleted a reviewed commit in the reproduction behind this
+// rule was authored by the CI repair agent itself. Who wrote the repair says
+// nothing about what it did to the reviewed commits.
 //
 // Once recording or publication succeeds, the run's recorded head advances;
 // the two paths differ in whether the repair is published now or held until

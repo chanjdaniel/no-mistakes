@@ -95,29 +95,28 @@ work unchanged.
 
 ### Private mirror reconciliation
 
-A rebase can leave the gate branch on an older history that rejects the next
-ordinary push. Reconciliation compares exact commit heads and per-file
-`git patch-id --stable` identities; commit messages are not evidence. Historical
-patch matches also require a clean three-way merge of the private head into the
-live head whose resulting tree equals the live tree. This prevents changes
-discarded by a merge or revert from being counted as surviving content. If that
-survival check cannot prove preservation, the private-only range is reported
-as at risk.
+The gate branch can hold a head the next ordinary push does not descend from: an operator's own rewrite, a rebase an older binary published, or a base merge the pipeline published after which the operator merged the same base by hand.
+Reconciliation compares exact commit heads and per-file `git patch-id --stable` identities; commit messages are not evidence.
+Historical patch matches also require a clean three-way merge of the private head into the live head whose resulting tree equals the live tree.
+This prevents changes discarded by a merge or revert from being counted as surviving content.
+If that survival check cannot prove preservation, the private-only range is reported as at risk.
 
-**Accepted Decision 41-A (issue #983):** pipeline publication may replace a
-private mirror head that is **exactly equal to a head the publishing run itself
-placed on the mirror** without patch-ID or tree-survival proof: its
-`Run.SubmittedHeadSHA`, or, once it has published, its durable
-`Run.LastPushedSHA`. The last pushed head is recorded only after a verified push to the configured
-push target and mirror settlement, so it is never an external or newer head.
-This narrow policy exception permits reviewed rebases and conflict resolutions
-to change the submitted patch, including a CI merge-conflict repair that is
-revalidated from Review after the run has already published. The replacement
-head must still be review-approved, and the force push to the configured target
-stays leased on the same last pushed head. Ownership is not containment evidence. The
-exception does not extend to another recorded head, an agent-created head, an
-abbreviated SHA, or an external, newer, or divergent private head. Fresh AXI
-submissions do not receive this exception.
+A private-only merge commit has no per-file patch of its own, so it is at risk unless one narrow rule proves it carries no content: it has exactly two parents, each reachable from the live head, and its tree equals the conflict-free `git merge-tree --write-tree` result of those parents.
+That is the gate's own merge of a moved base when the operator merged the same base.
+A merge holding a conflict resolution or an edit of its own, or with a parent the live head lacks, stays at risk.
+The same rule lets branch sync release a branch whose aborted, never-published run holds nothing but such a merge, so the next `axi run` starts after the operator's own merge and push.
+An aborted run that also holds other unpublished commits, such as a review fix, keeps custody: the `axi run` refusal names `no-mistakes axi status`, whose `branch_sync.next_action.command` is `no-mistakes axi sync --recover` (or the explicit discard `--recover --keep-local`).
+
+**Accepted Decision 41-A (issue #983):** pipeline publication may replace a private mirror head that is **exactly equal to a head the publishing run itself placed on the mirror** without patch-ID or tree-survival proof: its `Run.SubmittedHeadSHA`, or, once it has published, its durable `Run.LastPushedSHA`.
+The last pushed head is recorded only after a verified push to the configured push target and mirror settlement, so it is never an external or newer head.
+The exception was accepted for reviewed rebases and conflict resolutions that changed the submitted patch.
+The pipeline no longer rebases or resolves conflicts: a moved base, at Rebase or as a CI merge-conflict repair, enters as a merge commit on top of the head it integrates, which reaches the mirror as an ordinary descendant.
+Publication now also requires the published head to contain both of the heads the exception names (see [Publication keeps the run's history](#publication-keeps-the-runs-history)), so a mirror at either one is an ancestor that needs no reconciliation, and the exception no longer fires during publication.
+The exception keeps exactly its accepted scope.
+The replacement head must still be review-approved, and the force push to the configured target stays leased on the same last pushed head.
+Ownership is not containment evidence.
+The exception does not extend to another recorded head, an agent-created head, an abbreviated SHA, or an external, newer, or divergent private head.
+Fresh AXI submissions do not receive this exception.
 
 Reconciliation requires direct private branch and archive refs; symbolic refs,
 including dangling symbolic refs, are refused before containment checks. Ref
@@ -143,6 +142,15 @@ retry can still resolve the branch. AXI reconciles before its ordinary submissio
 push and restores an archived ref after a failed submission if no intervening
 ref has appeared. Neither path forces the private mirror.
 
+### Publication keeps the run's history
+
+Every head a run publishes contains the run's submitted head and, once the run has published, its last pushed head (`Run.LastPushedSHA`).
+The pipeline only appends to a branch: fix commits, and merge commits of a moved base.
+A head that lacks either one is a history the pipeline rewrote, such as a rebase, an agent's reset, or a dropped commit.
+The Push step and the CI step's repair publication share one publication path, which refuses such a head before it writes the PR attestation and before any push, whatever Review approved and whatever the force-push lease would allow.
+A missing, malformed, or unreachable submitted head fails closed.
+An operator who rewrites their branch and force-pushes it to the gate starts a new run whose submitted head is that rewrite, so the rewrite still publishes, through the same guarded `--force-with-lease` push as before.
+
 ### Daemon
 
 The daemon owns long-running work: creating worktrees, running the pipeline,
@@ -151,7 +159,7 @@ CLI would need to stay attached to every run.
 
 ### Disposable worktrees
 
-The worktree is where `no-mistakes` can safely rebase, run commands, let the
+The worktree is where `no-mistakes` can safely merge a moved base, run commands, let the
 agent edit files, and commit fixes. Your day-to-day working tree stays clean.
 
 ## Component overview

@@ -56,7 +56,7 @@ That directory is always outside the worktree and is reaped by no-mistakes on a 
 
 A complete gate never degrades silently when its configured pipeline agent is unavailable.
 The daemon resolves the effective agent before creating pipeline step records, and the run fails immediately with setup guidance if the configured binary cannot run.
-This refusal also applies when deterministic test or lint commands are configured because review and documentation always require agent judgment, while rebase, PR, and CI paths may need an agent to resolve conflicts, generate content, or fix failures.
+This refusal also applies when deterministic test or lint commands are configured because review and documentation always require agent judgment, while PR and CI paths may need an agent to generate content or repair CI.
 
 | Surface or capability | Works without a runnable pipeline agent? | Behavior |
 | --- | ---: | --- |
@@ -154,11 +154,13 @@ That is a successful agent stopping point: report that the PR is ready and ask t
 Successful outcomes also instruct the agent to summarize the run for the user.
 When the pipeline applied fixes, successful outcomes include a `fixes` table listing each fix so the agent can acknowledge what it missed and the user can review them.
 
-If that PR later falls behind the default branch or hits a merge conflict - commonly because another PR merged first - the agent runs no command and must never hand-rebase.
-The CI monitor stays live in the background after checks pass, and when it sees an actual conflict it rebases onto the base, resolves it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push, so no agent or user action is needed.
-A PR that is merely behind but still clean needs nothing either, since the platform merges it.
+If that PR later falls behind the default branch or hits a merge conflict - commonly because another PR merged first - the agent runs no command while the CI monitor is still running.
+The CI monitor stays live in the background after checks pass, and when it sees an actual conflict it merges the PR's base only if the base merges cleanly: it adds a merge commit and re-pushes the branch as a fast-forward, so every commit already on the PR keeps its SHA.
+A base that conflicts is never resolved by the gate: the monitor parks at a gate with each conflicted file named in an `ask-user` finding.
+Never rebase; on a conflict gate, merge the base locally, resolve, and push.
+A PR that is merely behind but still clean needs nothing, since the platform merges it.
 The one exception is when that monitor is no longer running - the PR was closed, the run was aborted or superseded, it idle-timed-out, or its auto-fix attempts were exhausted - in which case see [`no-mistakes rerun`](/no-mistakes/reference/cli/#no-mistakes-rerun) for the restart conditions.
-The agent must not use `no-mistakes axi run` to refresh a still-active PR: after `checks-passed` it reattaches to the running monitor with HEAD unchanged and returns the monitor output without rebasing.
+The agent must not use `no-mistakes axi run` to refresh a still-active PR: after `checks-passed` it reattaches to the running monitor with HEAD unchanged and returns the monitor output without integrating anything.
 
 In task-first mode, if the repo is on the default branch, the skill tells the agent to create a feature branch before committing because the gate validates committed history on a non-default branch.
 The agent should inspect `git status` before changing or committing anything, preserve unrelated pre-existing uncommitted changes, and commit only the changes that belong to the user's task.
@@ -178,11 +180,11 @@ no-mistakes axi abort
 no-mistakes axi abort --run <id>
 ```
 
-Before any post-pipeline local commit or fresh run, read `branch_sync` and follow its exact `next_action.command`.
+Before any post-pipeline local commit or fresh run, read `branch_sync` (`no-mistakes axi status` shows it) and follow its exact `next_action.command`.
 A `sync` action runs `no-mistakes axi sync` first.
 A `recover_custody` action is ordinary `no-mistakes axi sync --recover` to take a still-available preserved head, or `no-mistakes axi sync --recover --keep-local` when that head is unavailable and you are discarding the missing commits, or when a bound archive preserves divergent later work while custody returns at the reported required head; never substitute one action for the other. See [`no-mistakes rerun`](/no-mistakes/reference/cli/#no-mistakes-rerun) for the alternative validation path and its refusal conditions.
 An `adopt_published` action is `no-mistakes axi sync --adopt-published`: it verifies the configured push target already has the exact rebased local head, then updates only the stale gate lane. A target mismatch or target change refuses without replacing that lane.
-A `branch_sync.state` of `user_owned` means the run went terminal before changing the submitted head and cancellation released the branch: it is immediately usable and needs no sync action.
+A `branch_sync.state` of `user_owned` means the run's outcome released the branch: it went terminal before changing the submitted head, or its only unpublished commits are clean merges of a base your branch has merged too. It is immediately usable and needs no sync action.
 When `next_action.code` is `continue_active_run`, run the reported command and keep driving the active run.
 If synchronization is blocked, process that state instead of improvising reset, stash, merge, rebase, force, or branch replacement.
 Then commit follow-up work on top so every pipeline fix commit remains in the branch.
@@ -246,7 +248,7 @@ Transient API and network failures, stochastic prose turn endings, transient too
 When an agent starts a run through `no-mistakes axi run --intent`, no-mistakes uses that supplied intent verbatim as authoritative acceptance criteria and skips transcript-based inference, even if `intent.enabled` is false.
 Review checks the diff against those criteria, and a change that removes required behavior or adds forbidden behavior becomes an `ask-user` finding instead of being resolved automatically.
 Otherwise, when `intent.enabled` is true, no-mistakes reads recent local transcripts from Claude Code, Codex, OpenCode, Rovo Dev, Pi, and the GitHub Copilot CLI during the `intent` pipeline step.
-It matches sessions against non-deleted changed files when present, falls back to all changed files for all-deletion diffs, summarizes the likely author intent with the configured pipeline agent, and includes that summary as an untrusted, low-confidence hint in rebase fixes, review checks and fixes, test detection, evidence validation, and fixes, lint detection and fixes, documentation checks and fixes, CI auto-fixes, and PR prompts. Publication of the generated Intent section is controlled by the repository's trusted [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent), tightened further for individual runs by `axi run --no-publish-intent` or globally by `intent.publish_intent: false` in global config. Every one of these controls is tighten-only, and no caller-side setting can publish intent on a repository whose trusted config disabled it. The full intent always reaches the rebase, review, test, lint, documentation, and CI prompts listed above; under the caller-side omission the PR-drafting prompts receive no intent text at all, so the public PR can carry neither the section nor a paraphrase of it.
+It matches sessions against non-deleted changed files when present, falls back to all changed files for all-deletion diffs, summarizes the likely author intent with the configured pipeline agent, and includes that summary as an untrusted, low-confidence hint in review checks and fixes, test detection, evidence validation, and fixes, lint detection and fixes, documentation checks and fixes, CI auto-fixes, and PR prompts. Publication of the generated Intent section is controlled by the repository's trusted [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent), tightened further for individual runs by `axi run --no-publish-intent` or globally by `intent.publish_intent: false` in global config. Every one of these controls is tighten-only, and no caller-side setting can publish intent on a repository whose trusted config disabled it. The full intent always reaches the review, test, lint, documentation, and CI prompts listed above; under the caller-side omission the PR-drafting prompts receive no intent text at all, so the public PR can carry neither the section nor a paraphrase of it.
 
 Transcript readers collect user and assistant text messages but exclude tool call output.
 They read Claude Code transcripts from `~/.claude/projects`, Codex metadata from `~/.codex/state_*.sqlite` plus referenced rollout files, OpenCode messages from `$XDG_DATA_HOME/opencode/opencode.db` or `~/.local/share/opencode/opencode.db`, Rovo Dev sessions from `~/.rovodev/sessions`, Pi transcripts from `~/.pi/agent/sessions`, and GitHub Copilot CLI sessions from `~/.copilot/session-state`.

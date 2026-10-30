@@ -288,6 +288,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		encoded, _ := types.MarshalFindingsJSON(findings)
 		outcome, err = &pipeline.StepOutcome{NeedsApproval: true, Findings: encoded}, nil
 	}()
+	// Recovery has no integration path of its own: a merge or rebase an
+	// interrupted attempt left in the worktree is undone before anything reads
+	// its head, and a conflict repair merges again from there.
+	if err := abortInterruptedIntegration(sctx, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }); err != nil {
+		return nil, err
+	}
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}

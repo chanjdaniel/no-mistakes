@@ -92,7 +92,7 @@ const (
 // Finding category constants for the CI step's check findings. The CI step
 // turns each settled issue on the pull request into one finding and the fix
 // half routes by this category: a check finding names its provider check in
-// Finding.Check, a merge-conflict finding asks for a rebase, a transient
+// Finding.Check, a merge-conflict finding asks for a merge of the PR's base, a transient
 // finding is a provider-attributed outcome no code change can clear, and a
 // review-bot finding carries one unresolved comment from a third-party
 // review bot's check.

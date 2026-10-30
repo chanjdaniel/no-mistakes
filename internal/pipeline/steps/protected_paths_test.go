@@ -22,41 +22,18 @@ func TestCIStep_ProtectedPathRetryUsesPersistedRepair(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name       string
-		rebase     bool
 		revalidate bool
 		addOnly    bool
 		unverified bool
 	}{
 		{name: "added_finding_only_publish", addOnly: true},
 		{name: "added_finding_only_revalidate", addOnly: true, revalidate: true},
-		{name: "rebased_conflict", rebase: true},
-		{name: "unverified_rewrite_stays_refused", rebase: true, unverified: true},
+		{name: "unverified_rewrite_stays_refused", unverified: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newCIRepairFixture(t, tc.revalidate, nil)
-			if tc.rebase {
-				gitCmd(t, f.dir, "checkout", "main")
-				if err := os.WriteFile(filepath.Join(f.dir, "feature.txt"), []byte("base change\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				gitCmd(t, f.dir, "add", "feature.txt")
-				gitCmd(t, f.dir, "commit", "-m", "advance conflicting base")
-				gitCmd(t, f.dir, "push", "origin", "main")
-				gitCmd(t, f.dir, "checkout", "feature")
-				f.sctx.Env = fakeCIGHMergeable(t, "OPEN", `[]`, "CONFLICTING")
-			}
 			f.sctx.Agent = &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-				if tc.rebase {
-					if _, err := stepGitRun(f.sctx, "rebase", "main"); err == nil {
-						t.Error("fixture rebase must conflict")
-					}
-					if err := os.WriteFile(filepath.Join(f.dir, "feature.txt"), []byte("base change\nresolved feature\n"), 0o644); err != nil {
-						t.Fatal(err)
-					}
-					gitCmd(t, f.dir, "add", "feature.txt")
-					gitCmd(t, f.dir, "-c", "core.editor=true", "rebase", "--continue")
-				}
 				if err := os.WriteFile(filepath.Join(f.dir, "package.lock"), []byte("staged lock\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
@@ -169,7 +146,7 @@ func TestCIStep_ProtectedPathRetryUsesPersistedRepair(t *testing.T) {
 			select {
 			case err = <-done:
 				done <- err
-			// Rebased repairs run Review, Test, attestation, and Push before
+			// Revalidated repairs run Review, Test, attestation, and Push before
 			// monitoring resumes. Allow for Windows Git process startup costs.
 			case <-time.After(60 * time.Second):
 				t.Fatal("explicit retry did not finish")
@@ -189,7 +166,7 @@ func TestCIStep_ProtectedPathRetryUsesPersistedRepair(t *testing.T) {
 				t.Fatalf("publication lost retained repair: %q", got)
 			}
 			wantReviews := 0
-			if tc.rebase || tc.revalidate {
+			if tc.revalidate {
 				wantReviews = 1
 			}
 			if reviews != wantReviews {

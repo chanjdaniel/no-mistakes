@@ -237,7 +237,6 @@ func TestAgentModelRoutesEachStepOnRealBinary(t *testing.T) {
 
 	wantByStep := map[string]string{
 		"intent":   "",
-		"rebase":   "",
 		"review":   routedReviewModel,
 		"test":     routedTestModel,
 		"document": routedDocumentModel,

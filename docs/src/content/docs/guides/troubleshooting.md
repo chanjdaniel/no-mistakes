@@ -171,8 +171,15 @@ Fatal step errors are appended to that log, so failures such as rejected pushes 
 This means the live remote branch changed after the pipeline's last observed head and contains commit(s) the validated worktree did not incorporate.
 `no-mistakes` refuses the push instead of overwriting that remote work.
 
-Fetch and inspect the configured push target, then rebase or merge the remote work into your branch before pushing through `no-mistakes` again.
+Fetch and inspect the configured push target, then merge the remote work into your branch before pushing through `no-mistakes` again.
 If the overwrite is intentional, push manually to the actual remote after reviewing the commits that would be discarded.
+
+### Push fails with `does not contain the run's submitted head` or `last pushed head`
+
+This means the head the run was about to publish dropped the commit you pushed to the gate, or a commit the run had already published.
+The pipeline only ever appends to your branch, so such a head is a history something in the run rewrote, and `no-mistakes` refuses it before writing the PR attestation or pushing (see [Publication keeps the run's history](/no-mistakes/concepts/gate-model/#publication-keeps-the-runs-history)).
+Nothing reached the remote.
+Push your branch through `no-mistakes` again to start a new run; if you meant to rewrite the branch yourself, force-push the rewrite to the gate, which starts a run whose submitted head is that rewrite.
 
 ### Push fails with `refusing to allow an OAuth App to create or update workflow ... without workflow scope`
 
@@ -312,7 +319,7 @@ A quiet Review step still ends on its own: each fixer or reviewer invocation is 
 A quiet Test step is bounded the same way by [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout), covering the post-test evidence-gathering agent and a Test-repair turn.
 An expired Test budget parks for a decision rather than failing the run as a code defect; raise that setting when targeted tests or evidence gathering routinely approach the default 30m.
 A Review cut deliberately still fails the run rather than parking, because an approved Review park would let Push ship a half-finished, unreviewed fix; parking Review cuts as well is left to a separate follow-up.
-Every other agent-spawning step (Document, Lint, Rebase conflict repair, PR drafting, CI auto-fix) is bounded by [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout), so a stall reaches the step's normal agent-error handling instead of remaining active until you abort. Most mutation steps fail, PR drafting continues with deterministic fallback content, and CI auto-fix parks for a user decision as described in the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci).
+Every other agent-spawning step (Document, Lint, PR drafting, CI auto-fix) is bounded by [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout), so a stall reaches the step's normal agent-error handling instead of remaining active until you abort. Most mutation steps fail, PR drafting continues with deterministic fallback content, and CI auto-fix parks for a user decision as described in the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci).
 
 Start by reading the active run and the step log:
 
