@@ -1,8 +1,10 @@
 package update
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,6 +104,10 @@ func TestRunningDaemonExecutablePathUsesPIDFile(t *testing.T) {
 
 func TestRunningDaemonExecutablePathHandlesExecutablePathsWithSpaces(t *testing.T) {
 	if os.Getenv("NO_MISTAKES_TEST_CHILD") == "1" {
+		// Announce that this process is running the copied binary, so the
+		// parent reads /proc/<pid>/exe only after exec, never between fork
+		// and exec while it still names the parent's binary.
+		fmt.Println(childReadyLine)
 		time.Sleep(10 * time.Second)
 		return
 	}
@@ -130,6 +136,10 @@ func TestRunningDaemonExecutablePathHandlesExecutablePathsWithSpaces(t *testing.
 
 	cmd := exec.Command(copyPath, "-test.run=^TestRunningDaemonExecutablePathHandlesExecutablePathsWithSpaces$")
 	cmd.Env = append(os.Environ(), "NO_MISTAKES_TEST_CHILD=1")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -137,6 +147,7 @@ func TestRunningDaemonExecutablePathHandlesExecutablePathsWithSpaces(t *testing.
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
 	})
+	waitForChildReady(t, stdout)
 
 	p := paths.WithRoot(t.TempDir())
 	if err := os.WriteFile(p.PIDFile(), []byte(fmt.Sprintf("%d", cmd.Process.Pid)), 0o644); err != nil {
@@ -322,4 +333,19 @@ func TestDefaultResetDaemonDoesNotReportOfflineWhenRestartLeavesDaemonRunning(t 
 	if checks < 2 {
 		t.Fatalf("expected follow-up daemon check, got %d checks", checks)
 	}
+}
+
+// childReadyLine is what the copied test binary prints once it is running.
+const childReadyLine = "no-mistakes-test-child-ready"
+
+// waitForChildReady blocks until the child prints childReadyLine.
+func waitForChildReady(t *testing.T, stdout io.Reader) {
+	t.Helper()
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) == childReadyLine {
+			return
+		}
+	}
+	t.Fatalf("test child exited before reporting ready: %v", scanner.Err())
 }
