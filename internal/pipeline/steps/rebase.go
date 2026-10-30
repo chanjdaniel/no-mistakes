@@ -134,15 +134,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 			label := mergeTargetLabel(target)
 			conflictTargets = append(conflictTargets, label)
 			for _, file := range conflictFiles {
-				conflictFindings = append(conflictFindings, Finding{
-					Severity: "warning",
-					File:     file,
-					Description: fmt.Sprintf("merge conflict merging %s: merge %s into your branch locally, resolve, and push; the gate does not resolve merge conflicts",
-						label, label),
-					// Resolving a conflict is a human's deliberate, auditable
-					// act, so nothing automatic may select this finding.
-					Action: types.ActionAskUser,
-				})
+				conflictFindings = append(conflictFindings, mergeConflictFinding(label, file))
 			}
 		}
 	}

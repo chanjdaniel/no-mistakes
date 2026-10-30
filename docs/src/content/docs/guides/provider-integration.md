@@ -81,7 +81,7 @@ If one daemon serves repositories that require non-overlapping accounts, give ea
 - CI check polling with exponential backoff (30s → 60s → 120s) until the PR is merged, closed, or the configured `ci_timeout` idle window elapses
 - Failed job log fetching (`gh run view --log-failed`) for the CI auto-fix step
 - A red Greptile check parked as `ask-user` CI findings carrying its unresolved review-thread comments, which are also supplied to CI repair prompts; see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for filtering and prompt-safety details
-- PR mergeability polling, and agent-driven resolution when the provider reports an actual merge conflict
+- PR mergeability polling, and a merge of the PR's base when the provider reports an actual merge conflict (a base that conflicts parks for the operator's own merge)
 
 ### GitHub fork contributions
 

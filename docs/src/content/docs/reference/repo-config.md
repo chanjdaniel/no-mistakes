@@ -568,7 +568,7 @@ Before staging an automatic Review, Test, Document, Lint, or CI repair, an opera
 
 A protected-path refusal always requires an explicit response, including under AXI `--yes` and TUI yolo mode. CI does not retry its fixer, and automatic gate reconciliation cannot clear the refusal, even if the PR closes. Approval is rejected because it would skip unfinished work: inspect and resolve the reported edit, then use `no-mistakes axi respond --action fix` to retry the step, including its commit and publication. Deliberate skip and abort behavior is unchanged.
 
-For CI, that explicit fix finishes the retained repair before normal monitoring can report `checks-passed`, even if forge checks turned green while parked or the response selects only an added finding. It uses the existing [repair revalidation policy](#cirevalidate_repairs), including mandatory revalidation from Review for a rebased conflict repair, and the existing publication guards. If the retained repair cannot finish, the refusal remains available for another explicit fix response.
+For CI, that explicit fix finishes the retained repair before normal monitoring can report `checks-passed`, even if forge checks turned green while parked or the response selects only an added finding. It uses the existing [repair revalidation policy](#cirevalidate_repairs) and the existing publication guards. If the retained repair cannot finish, the refusal remains available for another explicit fix response.
 
 This is a staging guard, not an agent filesystem sandbox or a check on semantic intent. It does not inspect changes already committed by the author or an agent, and it does not infer whether an unprotected edit belongs to a finding. With an empty list, automatic staging keeps its existing behavior. `ignore_patterns` only filters checks and does not prevent staging.
 
@@ -635,7 +635,7 @@ The remaining outcomes are the job's own verdict on the commit and are never re-
 - `stale` is already treated as skipped rather than failed, so it never reaches this decision.
 - An outcome no-mistakes recognizes as none of the above never earns a rerun either.
 
-A single genuine job failure, or a merge conflict, suppresses the rerun for that poll: the fix agent is needed regardless, and no rerun can clear a merge conflict.
+A single genuine job failure, or a merge conflict, suppresses the rerun for that poll: a fix round is needed regardless, and no rerun can clear a merge conflict.
 
 The budget is per check per run and is spent when the rerun is requested, so a provider that refuses the request cannot be retried in a loop.
 Check names are not unique on a pull request, so same-named checks share one budget.
@@ -685,7 +685,7 @@ Continuity is proven when the repaired head is the run's durably review-approved
 
 CI repair publication uses the same settlement order as Push. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the publication and retry behavior.
 
-**Merge-conflict repairs always revalidate, under either setting.** They are not carved out - they simply always land in the cannot-be-proven half. A conflict repair rebases, so the repaired head is never a descendant of the reviewed head; resolving a conflict changes the commit's patch-id; and no content-based guard can separate "rebased and resolved" from "dropped the work". Revalidating is what keeps that safe: the rewritten head is not published until Review has approved it, so the reviewed commits stay on the remote in the meantime.
+**Merge-conflict repairs follow the same rule.** The CI step repairs a forge-reported conflict by merging the PR's base, never by rebasing, and no agent is involved, so a clean merge's first parent is the reviewed head and its continuity is proven by ancestry like any other repair. A base that conflicts is never resolved by no-mistakes: the step parks for your own merge (see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci)).
 
 Provenance is deliberately not accepted as a substitute for that proof. In the reproduction this rule exists for, the repair that deleted a reviewed commit was authored by no-mistakes' own CI repair agent: it reset to the rebase base, left a clean tree, and the pipeline reported success while the remote lost the work. Who wrote a repair says nothing about what it did to the reviewed commits.
 
@@ -694,7 +694,7 @@ The tradeoff `true` buys is cost against an unreviewed repair:
 | | `false` (default) | `true` |
 |---|---|---|
 | Ordinary repair that builds on the reviewed head | published immediately, one agent round | revalidated: one agent round plus a full Review, Test, Document, Lint, Push, PR pass |
-| Merge-conflict repair | revalidated | revalidated |
+| Merge-conflict repair (a clean merge of the PR's base) | published immediately, no agent round | revalidated: no agent round, plus a full Review, Test, Document, Lint, Push, PR pass |
 | Ordinary repair is reviewed before it reaches the PR | no | yes |
 | Steps that re-run when a repair revalidates | Review onward; Intent and Rebase do not | same |
 | Run identity | unchanged; a restart is a same-run rewind | same |
@@ -732,11 +732,11 @@ rebase:
 What the merge shape keeps:
 
 - **The reviewed head** stays on the branch as the merge commit's first parent, and every commit already on the branch keeps its SHA.
-- **Publication** is a fast-forward: an open PR's head is appended to, never rewritten, and no push needs `--force`. A CI merge-conflict repair is the exception: it still rebases onto the base branch, so that repair still force-pushes and still revalidates in full.
+- **Publication** is a fast-forward: an open PR's head is appended to, never rewritten, and no push needs `--force`. The CI step's merge-conflict repair merges the PR's base the same way, so it publishes as a fast-forward too.
 - **Continuity.** The CI step publishes a repair without a full revalidation cycle only when it can prove the repaired head continues the reviewed head (see [`ci.revalidate_repairs`](#cirevalidate_repairs)). After a merge that proof is plain ancestry, because the reviewed head is a parent.
 - **Attestation.** A review attestation that binds to an exact commit SHA survives a merge, because the attested commit stays in the branch's history.
 
-**Conflicts are the operator's.** A base that does not merge cleanly is never resolved by no-mistakes: the step parks with one `ask-user` finding per conflicted file, and the branch is left exactly where it was.
+**Conflicts are the operator's.** A base that does not merge cleanly is never resolved by no-mistakes: the Rebase step, or the CI step's merge-conflict repair, parks with one `ask-user` finding per conflicted file, and the branch is left exactly where it was.
 Merge the base into your branch locally, resolve, and push; that push starts a new run.
 The resolution is then your own merge commit, whose two parents and their merge base show what it kept from each side.
 

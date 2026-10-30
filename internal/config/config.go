@@ -94,8 +94,7 @@ const (
 	// False does not mean "always publish". It means "publish when it is
 	// provably safe to": a repair is published only when its head is the run's
 	// review-approved commit or a descendant of it, and any repair that cannot
-	// show that - every merge-conflict repair, since a rebase rewrites the
-	// head - revalidates from Review instead. See CI.RevalidateRepairs.
+	// show that revalidates from Review instead. See CI.RevalidateRepairs.
 	DefaultCIRevalidateRepairs = false
 	// RebaseStrategyMerge integrates a moved base with a merge commit whose
 	// first parent is the branch head the pipeline reviewed. It is the only
@@ -626,10 +625,8 @@ type CI struct {
 	// succeeds - and the CI monitor keeps watching the same run for the new
 	// head. The run's review approval stays valid because the repair descends
 	// from the approved head. A repair whose continuity cannot be proven takes
-	// the revalidating path below instead; a merge-conflict repair always does,
-	// because a rebase makes its head a non-descendant and resolving a conflict
-	// changes the commit's patch-id, so no content-based guard can tell a
-	// resolved rebase from one that dropped the work.
+	// the revalidating path below instead. A merge-conflict repair is a merge
+	// commit whose first parent is the reviewed head, so it is provable.
 	//
 	// true: the repair is kept local, the run's review approval is revoked,
 	// and the pipeline restarts at Review so the repaired head re-passes
@@ -1118,8 +1115,8 @@ forgejo_axi_path: forgejo-axi
 #   devin: devin acp
 
 # Maximum time the CI monitor babysits an open PR with no base-branch movement
-# before giving up. The monitor watches CI and auto-rebases when the base branch
-# advances; each base advance re-arms this timer, so an actively-updated green PR
+# before giving up. The monitor watches CI and the PR's mergeability; each
+# base-branch advance re-arms this timer, so an actively-updated green PR
 # keeps its monitor. Set to "unlimited", "none", "off", "never", or any
 # non-positive duration to monitor until the PR is merged, closed, or the run is
 # aborted with: no-mistakes axi abort --run <id>

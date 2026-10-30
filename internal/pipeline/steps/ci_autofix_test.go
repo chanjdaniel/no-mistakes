@@ -678,7 +678,9 @@ func TestCIStep_DoesNotRetryOnUnrelatedPendingCheck(t *testing.T) {
 
 }
 
-func TestCIStep_RetriesMergeConflictAfterRerun(t *testing.T) {
+// Under ci.revalidate_repairs a clean merge of the PR's base is held locally
+// like any other repair and revalidates from Review; no agent is involved.
+func TestCIStep_MergeConflictRepairRevalidatesUnderRevalidateRepairs(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -702,24 +704,19 @@ func TestCIStep_RetriesMergeConflictAfterRerun(t *testing.T) {
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "push", "origin", "feature")
 
-	checksSequence := []string{
-		`[{"name":"build","status":"COMPLETED","conclusion":"success","bucket":"pass"}]`,
-		`[{"name":"build","status":"IN_PROGRESS","bucket":"pending"}]`,
-		`[{"name":"build","status":"COMPLETED","conclusion":"success","bucket":"pass"}]`,
-		`[{"name":"build","status":"IN_PROGRESS","bucket":"pending"}]`,
-		`[{"name":"build","status":"COMPLETED","conclusion":"success","bucket":"pass"}]`,
-	}
-	env := fakeCIGHSequenceMergeable(t, "OPEN", checksSequence, "CONFLICTING")
+	gitCmd(t, dir, "checkout", "main")
+	os.WriteFile(filepath.Join(dir, "main.txt"), []byte("main moved"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "main moves")
+	mainTip := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "checkout", "feature")
 
-	fixCount := 0
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			fixCount++
-			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("conflict-fix-%d.txt", fixCount)), []byte("resolved"), 0o644)
-			return &agent.Result{}, nil
-		},
-	}
+	env := fakeCIGHMergeable(t, "OPEN", `[{"name":"build","status":"COMPLETED","conclusion":"success","bucket":"pass"}]`, "CONFLICTING")
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		t.Errorf("the merge-conflict repair invoked an agent")
+		return &agent.Result{}, nil
+	}}
 
 	prURL := "https://github.com/test/repo/pull/42"
 	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
@@ -731,21 +728,18 @@ func TestCIStep_RetriesMergeConflictAfterRerun(t *testing.T) {
 	sctx.Config.AutoFix = config.AutoFix{CI: 2}
 	sctx.Config.CI.RevalidateRepairs = true
 
-	var logs []string
-	sctx.Log = func(s string) { logs = append(logs, s) }
-
 	step := &CIStep{
 		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
 			return nil
 		},
 	}
 	outcome, err := driveCI(t, step, sctx)
-	if err != nil {
-		t.Fatalf("expected approval outcome after retries, got error: %v", err)
-	}
 	assertCIRestartsValidation(t, outcome, err)
-	if fixCount != 1 {
-		t.Fatalf("expected one local repair before revalidation, got %d", fixCount)
+	if got := strings.Fields(gitCmd(t, dir, "rev-list", "--parents", "-n", "1", sctx.Run.HeadSHA)); len(got) != 3 || got[1] != headSHA || got[2] != mainTip {
+		t.Fatalf("recorded head %v, want a merge commit of [%s %s]", got, headSHA, mainTip)
+	}
+	if remote := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); remote != headSHA {
+		t.Fatalf("remote feature = %s, want the repair held locally until Review approves it", remote)
 	}
 }
 
@@ -1225,9 +1219,7 @@ func TestCIStep_FixPromptPrefersSimplificationOverMachinery(t *testing.T) {
 // invariant, and the repair closes it at every sibling site in the changed
 // area in the same round, never as machinery, then re-traces the failing
 // sequence and the ordinary path through every changed function before
-// verifying. Neither superseded scope rule may return. Merge-conflict-only
-// repair is a sibling path of the same CI fixer, so it carries the same three
-// rules rather than the old minimal conflict prompt.
+// verifying. Neither superseded scope rule may return.
 func TestCIStep_FixPromptClosesTheInvariantAcrossSiblingSites(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -1235,7 +1227,7 @@ func TestCIStep_FixPromptClosesTheInvariantAcrossSiblingSites(t *testing.T) {
 		targets ciFixTargets
 	}{
 		{name: "failing_check", targets: ciTargetsFor([]string{"test"}, false)},
-		{name: "merge_conflict_only", targets: ciTargetsFor(nil, true)},
+		{name: "selected_finding_without_check", targets: ciFixTargets{Findings: Findings{Items: []Finding{{ID: "ci-1", Severity: types.FindingSeverityWarning, Action: types.ActionAutoFix, Category: types.FindingCategoryCIReviewBot, Description: "tighten the error message"}}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

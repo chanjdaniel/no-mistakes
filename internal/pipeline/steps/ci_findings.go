@@ -372,6 +372,23 @@ func parseCIFixTargets(raw string) (ciFixTargets, error) {
 
 func (t ciFixTargets) empty() bool { return len(t.Findings.Items) == 0 }
 
+// agentFindings are the selected findings the fix agent repairs: all of them
+// except the merge conflict, which the round repairs itself by merging the
+// base and never hands to an agent. The observation's summary goes with the
+// conflict, since it names it.
+func (t ciFixTargets) agentFindings() Findings {
+	out := types.FindingsMetadata(t.Findings)
+	for _, item := range t.Findings.Items {
+		if item.Category != types.FindingCategoryCIMergeConflict {
+			out.Items = append(out.Items, item)
+		}
+	}
+	if len(out.Items) != len(t.Findings.Items) {
+		out.Summary = ""
+	}
+	return out
+}
+
 // description names the round's targets the way the CI step log always has.
 func (t ciFixTargets) checkNames() []string {
 	names := make([]string, 0, len(t.Checks))

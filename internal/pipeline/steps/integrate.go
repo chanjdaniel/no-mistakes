@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // mergeIntoWorktree is the pipeline's one way to bring another line of history
@@ -75,6 +76,20 @@ func mergeIntoWorktree(sctx *pipeline.StepContext, run gitRunner, targetSHA, lab
 		return nil, cause
 	}
 	return nil, nil
+}
+
+// mergeConflictFinding is the finding a step parks on for one file a merge of
+// label conflicted in. Resolving a conflict is a human's deliberate, auditable
+// act, so it is ask-user and nothing automatic may select it; the description
+// tells the operator the one way forward.
+func mergeConflictFinding(label, file string) Finding {
+	return Finding{
+		Severity: "warning",
+		File:     file,
+		Description: fmt.Sprintf("merge conflict merging %s: merge %s into your branch locally, resolve, and push; the gate does not resolve merge conflicts",
+			label, label),
+		Action: types.ActionAskUser,
+	}
 }
 
 // abortInterruptedIntegration puts a run worktree left mid-merge or mid-rebase

@@ -187,8 +187,9 @@ Long-running `axi run` calls are working, not stalled; if one returns a `gate:`,
 Backgrounding a call is fine for an agent harness, but the run never advances past a gate on its own.
 When the CI step is still monitoring an open PR and checks are green - or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge. A generic empty check list without that declaration is not ready.
 Treat that as the agent stopping point: ask the user to review and merge the PR from the `help` line.
-If that PR later falls behind the default branch or hits a merge conflict, do not run `axi run`, `rerun`, or a manual rebase while the CI monitor is still running.
-The monitor auto-rebases onto the base, resolves actual conflicts, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push; a PR that is merely behind but clean needs no command.
+If that PR later falls behind the default branch or hits a merge conflict, do not run `axi run` or `rerun` while the CI monitor is still running, and never rebase.
+When the base merges cleanly, the monitor merges it in with a merge commit and re-pushes the branch as a fast-forward; when it conflicts, the monitor parks with each conflicted file named, and you merge the base locally, resolve, and push.
+A PR that is merely behind but clean needs no command.
 After that monitor ends, see [`no-mistakes rerun`](#no-mistakes-rerun) for the restart conditions.
 Successful outcomes (`checks-passed`, `passed`, `passed-with-override`, and `passed-with-skips`) also carry `help` instructions telling the agent to summarize the run.
 `passed-with-override` is a completed run with an explicitly approved Test exception or a CI approval over still-failing checks.

@@ -18,17 +18,27 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// canonicalStaleMonitorPhrases are the load-bearing claims of the corrected
+// canonicalStaleMonitorPhrases are the load-bearing claims of the
 // "PR fell behind / conflicted after checks pass" guidance: the live CI monitor
-// auto-rebases and re-pushes such a PR, so the agent runs no command and never
-// hand-rebases, and `no-mistakes rerun` is only the dead-monitor recovery,
-// subject to its clean caller-head check.
+// merges a base that merges cleanly and re-pushes it as a fast-forward, parks a
+// conflicting one with the files named, and never rebases; the operator
+// resolves a conflict with their own merge; and `no-mistakes rerun` is only
+// the dead-monitor recovery, subject to its clean caller-head check.
 var canonicalStaleMonitorPhrases = []string{
-	"never hand-rebase",
-	"revalidates from Review",
-	"cannot prove continuity with the reviewed head",
-	"re-pushes",
+	"merge commit",
+	"fast-forward",
+	"each conflicted file named",
+	"Never rebase; on a conflict gate, merge the base locally, resolve, and push",
 	"no-mistakes rerun",
+}
+
+// retiredStaleMonitorPhrases told the driving agent the monitor rebases and
+// resolves conflicts itself, which it no longer does.
+var retiredStaleMonitorPhrases = []string{
+	"hand-rebase",
+	"rebases onto",
+	"rebasing cannot prove",
+	"resolves it, revalidates",
 }
 
 var canonicalRerunRecoveryPhrases = []string{
@@ -70,10 +80,15 @@ func TestStaleMonitorGuidance_SyncedAcrossSurfaces(t *testing.T) {
 		}
 	}
 
-	// The discarded wrong framing must not creep back into any surface.
+	// The discarded wrong framings must not creep back into any surface.
 	for name, content := range surfaces {
 		if strings.Contains(content, "rebase step integrates the latest") {
 			t.Errorf("%s still carries the discarded 'rebase step integrates the latest default branch' wording", name)
+		}
+		for _, phrase := range retiredStaleMonitorPhrases {
+			if strings.Contains(content, phrase) {
+				t.Errorf("%s still says the monitor rebases: %q", name, phrase)
+			}
 		}
 	}
 

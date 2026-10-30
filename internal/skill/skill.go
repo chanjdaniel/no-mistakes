@@ -281,19 +281,24 @@ Never treat "no CI checks reported" alone as green.
 
 Because that monitor stays live, a PR that falls behind the default branch or
 hits a merge conflict after checks pass - commonly because another PR merged
-first - needs **no command from you**: never hand-rebase. When the CI monitor
-sees an actual conflict it **rebases onto the base, resolves it, revalidates from Review
-because rebasing cannot prove continuity with the reviewed head, and re-pushes
-the branch through Push**; a PR that is merely behind but still clean needs nothing
-either, since the platform merges it. The one exception is when that monitor is
-no longer running - the PR was closed, the run was aborted or superseded, it
+first - needs **no command from you** while the monitor runs. When the CI
+monitor sees an actual conflict it merges the base itself only if the base
+**merges cleanly: it adds a merge commit and re-pushes the branch as a
+fast-forward**, so every commit already on the PR keeps its SHA. A base that
+conflicts is never resolved by the gate: the monitor **parks at a gate with
+each conflicted file named** in an ` + "`ask-user`" + ` finding.
+Never rebase; on a conflict gate, merge the base locally, resolve, and push -
+relay the conflicted files to the user, and submit their merge as the custody
+guidance below allows. A PR that is merely behind but still clean needs
+nothing, since the platform merges it. The one exception is when that monitor
+is no longer running - the PR was closed, the run was aborted or superseded, it
 idle-timed-out, or its auto-fix attempts were exhausted - in which case recover
 with ` + "`no-mistakes rerun`" + `, subject to the clean-head check above. An accepted
-rerun cancels the stale monitor and re-runs the full pipeline including a
-deterministic rebase step. Do **not** reach for
+rerun cancels the stale monitor and re-runs the full pipeline, whose Rebase
+step merges a moved base the same deterministic way. Do **not** reach for
 ` + "`no-mistakes axi run`" + ` to refresh a still-active PR: after ` + "`checks-passed`" + ` it
 reattaches to the running monitor (HEAD unchanged) and returns its output
-without rebasing.
+without integrating anything.
 
 On a successful outcome (` + "`checks-passed`" + ` or ` + "`passed`" + `), close the loop with the
 user: summarize what happened during the pipeline in a concise, easily readable
