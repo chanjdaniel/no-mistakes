@@ -59,8 +59,9 @@ Combined lint duty (same pass - no separate lint agent will run):
 
 Set "category" on every finding: "documentation" for documentation findings, "lint" for lint findings.`
 
-// housekeepingFindingsSchema extends findingsSchema with the per-finding
-// category that routes combined-pass findings to their owning gates.
+// housekeepingFindingsSchema extends documentFindingsSchema with the
+// per-finding category that routes combined-pass findings to their owning
+// gates.
 var housekeepingFindingsSchema = json.RawMessage(`{
 	"type": "object",
 	"properties": {
@@ -80,10 +81,45 @@ var housekeepingFindingsSchema = json.RawMessage(`{
 				"required": ["severity", "description", "action", "category"]
 			}
 		},
-		"summary": {"type": "string"}
+		"summary": {"type": "string"},
+		"read_against_code": ` + readAgainstCodeSchema + `
 	},
 	"required": ["findings", "summary"]
 }`)
+
+// documentFindingsSchema is findingsSchema plus read_against_code, for the
+// document-only pass.
+var documentFindingsSchema = json.RawMessage(`{
+	"type": "object",
+	"properties": {
+		"findings": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"properties": {
+					"id": {"type": "string"},
+					"severity": {"type": "string", "enum": ["error", "warning", "info"]},
+					"file": {"type": "string"},
+					"line": {"type": "integer"},
+					"description": {"type": "string"},
+					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-user"]}
+				},
+				"required": ["severity", "description", "action"]
+			}
+		},
+		"summary": {"type": "string"},
+		"read_against_code": ` + readAgainstCodeSchema + `
+	},
+	"required": ["findings", "summary"]
+}`)
+
+// readAgainstCodeSchema is the optional list the verified-date guard reads
+// (documentPostPass): the docs the agent read in full against their code.
+const readAgainstCodeSchema = `{
+			"type": "array",
+			"items": {"type": "string"},
+			"description": "Repository-relative paths of the docs you read in full against the code they describe in this pass. Only these docs (and docs whose content you changed) may have their verified date moved."
+		}`
 
 func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
@@ -127,13 +163,17 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	}
 
 	prompt := s.buildPrompt(sctx, baseSHA, ignorePatterns, combinedLint)
-	schema := findingsSchema
+	schema := documentFindingsSchema
 	purpose := "document"
 	if combinedLint {
 		schema = housekeepingFindingsSchema
 		purpose = "housekeeping"
 	}
 
+	startHead, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve head before document agent: %w", err)
+	}
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
@@ -146,7 +186,11 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	}
 
 	// Commit whatever the agent edited, regardless of how trustworthy its
-	// structured output turns out to be.
+	// structured output turns out to be, once the post-pass has taken back
+	// what the step may not write.
+	if err := documentPostPass(sctx, startHead, result.Output); err != nil {
+		return nil, err
+	}
 	commitSummary := extractDocumentSummary(result.Output, "")
 	fallbackSummary := "update documentation"
 	if combinedLint {
@@ -246,6 +290,7 @@ Task:
 
 Rules:
 %s
+- Move a doc's `+"`verified`"+` frontmatter date only when you read that doc in full against the code it describes in this pass, and list each such doc's path in "read_against_code"; never lower a date, and never set one later than today. Before the commit, the pipeline restores a date moved on a doc you neither listed nor edited, a lowered date, and a date later than today.
 - The summary must be one concise sentence fragment suitable for a git commit subject.
 - Keep the summary under 10 words.%s`,
 		intro,

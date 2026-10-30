@@ -192,6 +192,9 @@ Updates matching documentation for code changes and reports only unresolved gaps
 - Asks the agent to find every documentation gap, update docs or doc comments for all gaps it can resolve, verify its edits, and commit any documentation changes under the placement policy
 - The placement policy gives each fact one authoritative owner, prefers removing stale duplicates or replacing them with pointers, avoids new documentation surfaces for perceived gaps, and keeps durable incident lessons near their owner instead of in `AGENTS.md`
 - `document.instructions` can add trusted default-branch ownership rules for the repository
+- Guards `verified` frontmatter dates before it commits, in the document pass, the combined housekeeping pass, and a manual fix round: in a `.md` or `.mdx` file whose leading frontmatter has a top-level `verified: YYYY-MM-DD` key, a date the agent moved or added is restored (or removed when it was absent) unless the agent listed that doc in its `read_against_code` output as read in full against the code, or changed the doc outside that line.
+  A date earlier than the one it replaced, or later than the local day the step runs, is restored even then.
+  An unreadable structured output lists nothing, so every such date is restored; each restoration is logged with the file and both values, and a file without the key is untouched.
 - When `commands.lint` is empty, performs documentation and agent-driven lint in one combined housekeeping invocation, categorizing findings for the document or lint gate; if that pass is skipped, its structured output is unusable, or a daemon restart loses the in-memory result, lint runs its own agent pass instead
 - Includes user intent when available
 - Returns findings only for unresolved documentation gaps or human judgment calls
