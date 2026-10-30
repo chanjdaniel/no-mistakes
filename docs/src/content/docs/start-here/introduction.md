@@ -22,7 +22,7 @@ ready.
 `no-mistakes` sits in that gap. It gives you a deliberate local gate before the
 branch reaches the configured push target:
 
-- **Before** the code is public, it rebases, runs a structured AI code review, runs baseline tests, gathers user-facing test evidence when intent is available, checks that docs are in sync, runs lint, and only then pushes to the configured target and opens the PR.
+- **Before** the code is public, it merges in a base branch that moved, runs a structured AI code review, runs baseline tests, gathers user-facing test evidence when intent is available, checks that docs are in sync, runs lint, and only then pushes to the configured target and opens the PR.
 - **After** the push, it watches CI and auto-fixes failures. On GitHub, GitLab, Forgejo, and Azure DevOps it also watches PR mergeability and fixes merge conflicts on the branch.
 - **Throughout**, every step can pause for your approval. You see the findings, pick what to fix, and decide when to ship.
 

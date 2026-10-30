@@ -3,9 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -29,9 +27,6 @@ const (
 	memoryReviewNoTouchFinding = "Never flag them merely for being changed"
 	memoryReviewAccuracy       = "you may report inaccurate content as you would in any other file"
 	memoryFixPrompted          = "when a finding or recorded human fix decision concerns memory-file content"
-	memoryConflictProbe        = "make no independent content edits beyond resolving the conflict itself"
-	memoryConflictResolution   = "resolve their conflicts yourself whether they have conflict markers or are modify/delete or add/add conflicts"
-	memoryConflictNoOtherEdits = "Make no other edits to their content"
 	memoryDocCorrectOnly       = "Edit them only to correct or remove information that is factually wrong"
 	memoryDocNoAdditions       = "never add content because something is missing"
 	memoryDocNoCreate          = "never create them when absent"
@@ -271,143 +266,6 @@ func TestCIStep_RepairPromptKeepsMemoryFilesHandsOff(t *testing.T) {
 		t.Fatal("expected the CI repair turn to run")
 	}
 	requirePromptContains(t, capturedPrompt, memoryHandsOffProbe, memoryHandsOffNoEdit, memoryHandsOffNoFix)
-}
-
-// The rebase conflict resolver gets the scoped variant: it must still be able
-// to resolve a conflicted AGENTS.md, but may not touch the content otherwise.
-func TestRebaseStep_ConflictPromptResolvesMemoryFileMarkers(t *testing.T) {
-	t.Parallel()
-	upstream := t.TempDir()
-	gitCmd(t, upstream, "init", "--bare")
-
-	dir := t.TempDir()
-	gitCmd(t, dir, "init")
-	gitCmd(t, dir, "config", "user.name", "test")
-	gitCmd(t, dir, "config", "user.email", "test@test.com")
-	gitCmd(t, dir, "checkout", "-b", "main")
-	gitCmd(t, dir, "remote", "add", "origin", upstream)
-	os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("base content\n"), 0o644)
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "base commit")
-	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-	gitCmd(t, dir, "push", "origin", "main")
-
-	gitCmd(t, dir, "checkout", "-b", "feature")
-	os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("feature change\n"), 0o644)
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "feature change")
-	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-
-	gitCmd(t, dir, "checkout", "main")
-	os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("main change\n"), 0o644)
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "main conflict")
-	gitCmd(t, dir, "push", "origin", "main")
-	gitCmd(t, dir, "checkout", "feature")
-
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("resolved content\n"), 0o644)
-			cmd := exec.Command("git", "add", "AGENTS.md")
-			cmd.Dir = dir
-			cmd.Env = append(os.Environ(),
-				"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-				"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
-			)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				return nil, fmt.Errorf("git add: %s: %w", out, err)
-			}
-			cmd = exec.Command("git", "rebase", "--continue")
-			cmd.Dir = dir
-			cmd.Env = append(os.Environ(),
-				"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-				"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
-				"GIT_EDITOR=true",
-			)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				return nil, fmt.Errorf("git rebase --continue: %s: %w", out, err)
-			}
-			return &agent.Result{Output: json.RawMessage(`{"summary":"resolve conflict"}`)}, nil
-		},
-	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Run.Branch = "refs/heads/feature"
-	sctx.Repo.UpstreamURL = upstream
-	sctx.Fixing = true
-	sctx.PreviousFindings = `{"findings":[{"severity":"warning","file":"AGENTS.md","description":"merge conflict rebasing onto origin/main"}]}`
-
-	if _, err := (&RebaseStep{}).Execute(sctx); err != nil {
-		t.Fatal(err)
-	}
-	if len(ag.calls) != 1 {
-		t.Fatalf("expected 1 conflict-resolution call, got %d", len(ag.calls))
-	}
-	prompt := ag.calls[0].Prompt
-	requirePromptContains(t, prompt, "- AGENTS.md", memoryConflictProbe, memoryConflictResolution, memoryConflictNoOtherEdits)
-	// The conflict prompt must not carry the generic independent-edit wording:
-	// a conflicted AGENTS.md has to be resolvable for the rebase to conclude.
-	requirePromptOmits(t, prompt, memoryHandsOffNoEdit, memoryHandsOffNoFix)
-}
-
-// A modify/delete conflict has no conflict markers. The merge resolver must
-// still ask the agent to settle the conflicted memory file itself.
-func TestRebaseStep_MergeStrategyConflictPromptResolvesMemoryFileModifyDelete(t *testing.T) {
-	t.Parallel()
-	upstream := t.TempDir()
-	gitCmd(t, upstream, "init", "--bare")
-	dir := t.TempDir()
-	gitCmd(t, dir, "init")
-	gitCmd(t, dir, "config", "user.name", "test")
-	gitCmd(t, dir, "config", "user.email", "test@test.com")
-	gitCmd(t, dir, "checkout", "-b", "main")
-	gitCmd(t, dir, "remote", "add", "origin", upstream)
-	writeFixtureFile(t, dir, "CLAUDE.md", "base\n")
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "base")
-	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-	gitCmd(t, dir, "push", "origin", "main")
-	gitCmd(t, dir, "checkout", "-b", "feature")
-	writeFixtureFile(t, dir, "CLAUDE.md", "feature change\n")
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "feature")
-	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-	gitCmd(t, dir, "checkout", "main")
-	gitCmd(t, dir, "rm", "CLAUDE.md")
-	gitCmd(t, dir, "commit", "-m", "remove memory file")
-	gitCmd(t, dir, "push", "origin", "main")
-	gitCmd(t, dir, "checkout", "feature")
-
-	var prompt string
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			prompt = opts.Prompt
-			if got := gitCmd(t, dir, "ls-files", "-u", "--", "CLAUDE.md"); got == "" {
-				t.Fatal("expected an unresolved modify/delete conflict in CLAUDE.md")
-			}
-			if content, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md")); err != nil || strings.Contains(string(content), "<<<<<<<") {
-				t.Fatalf("expected marker-less modify/delete conflict, content %q: %v", content, err)
-			}
-			gitCmd(t, dir, "add", "CLAUDE.md")
-			gitCmd(t, dir, "commit", "--no-edit")
-			return &agent.Result{Output: json.RawMessage(`{"summary":"kept both sides"}`)}, nil
-		},
-	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Run.Branch = "refs/heads/feature"
-	sctx.Repo.UpstreamURL = upstream
-	sctx.Config.Rebase.Strategy = config.RebaseStrategyMerge
-	sctx.Fixing = true
-
-	if _, err := (&RebaseStep{}).Execute(sctx); err != nil {
-		t.Fatal(err)
-	}
-	if len(ag.calls) != 1 {
-		t.Fatalf("expected 1 conflict-resolution call, got %d", len(ag.calls))
-	}
-	requirePromptContains(t, prompt, "- CLAUDE.md", memoryConflictProbe, memoryConflictResolution, memoryConflictNoOtherEdits)
-	requirePromptOmits(t, prompt, memoryHandsOffNoEdit, memoryHandsOffNoFix)
 }
 
 // PR drafting is output-oriented, but the same agent can still write to the

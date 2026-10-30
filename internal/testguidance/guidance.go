@@ -47,7 +47,7 @@ into an unrelated repository-wide cleanup.
 // prompt so repair roles retain their focused task instructions.
 func LateRepairPrompt(phase, prompt string) string {
 	switch phase {
-	case "ci", "rebase":
+	case "ci":
 		return Rule + "\n" + prompt
 	default:
 		return prompt

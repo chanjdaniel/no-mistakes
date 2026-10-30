@@ -1,17 +1,11 @@
 package steps
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
@@ -66,31 +60,14 @@ func TestRebaseStep_ConflictTriesAllTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !outcome.NeedsApproval {
-		t.Fatal("expected NeedsApproval for conflict")
-	}
-	if !outcome.AutoFixable {
-		t.Fatal("expected AutoFixable for conflict")
-	}
-	if !strings.Contains(outcome.Findings, "origin/feature") {
-		t.Errorf("expected findings to mention conflict target, got: %s", outcome.Findings)
-	}
+	assertConflictPark(t, outcome, "origin/feature", "shared.txt")
 
-	// The non-conflicting rebase onto origin/main should have succeeded
-	logOutput := gitCmd(t, dir, "log", "--oneline", "--all")
-	if !strings.Contains(logOutput, "main non-conflicting update") {
-		t.Log("git log:\n" + logOutput)
-	}
-	// Verify HEAD includes the main update (rebase onto origin/main applied)
-	headLog := gitCmd(t, dir, "log", "--oneline")
-	if !strings.Contains(headLog, "main non-conflicting update") {
-		t.Errorf("expected HEAD to include the origin/main rebase; git log:\n%s", headLog)
-	}
-
-	// Verify worktree is clean
-	status := gitStatusPorcelain(t, dir)
-	if status != "" {
-		t.Fatalf("expected clean worktree, got: %s", status)
+	// origin/main merged cleanly after the origin/feature conflict, but the
+	// step is all or nothing: a conflict on any target leaves the branch where
+	// the step found it, so nothing half-integrated is reviewed or published.
+	assertBranchUnchanged(t, sctx, dir, headSHA)
+	if strings.Contains(gitCmd(t, dir, "log", "--oneline"), "main non-conflicting update") {
+		t.Fatal("the clean origin/main merge survived a conflict on another target")
 	}
 }
 
@@ -153,106 +130,6 @@ func TestRebaseStep_UsesConfiguredPRBaseBranch(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "main.txt")); !os.IsNotExist(err) {
 		t.Fatal("rebase used forge default main instead of configured develop")
-	}
-}
-
-func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
-	t.Parallel()
-	upstream := t.TempDir()
-	gitCmd(t, upstream, "init", "--bare")
-
-	dir := t.TempDir()
-	gitCmd(t, dir, "init")
-	gitCmd(t, dir, "config", "user.name", "test")
-	gitCmd(t, dir, "config", "user.email", "test@test.com")
-	gitCmd(t, dir, "checkout", "-b", "main")
-	gitCmd(t, dir, "remote", "add", "origin", upstream)
-	os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("base content\n"), 0o644)
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "base commit")
-	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-	gitCmd(t, dir, "push", "origin", "main")
-
-	gitCmd(t, dir, "checkout", "-b", "feature")
-	os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("feature change\n"), 0o644)
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "feature change")
-	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-
-	gitCmd(t, dir, "checkout", "main")
-	os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("main change\n"), 0o644)
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "main conflict")
-	gitCmd(t, dir, "push", "origin", "main")
-	gitCmd(t, dir, "checkout", "feature")
-
-	// Agent simulates resolving conflicts: resolve file, git add, git rebase --continue
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			// Resolve the conflict by writing the merged content
-			os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("resolved content\n"), 0o644)
-			cmd := exec.Command("git", "add", "shared.txt")
-			cmd.Dir = dir
-			cmd.Env = append(os.Environ(),
-				"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-				"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
-			)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				return nil, fmt.Errorf("git add: %s: %w", out, err)
-			}
-			cmd = exec.Command("git", "rebase", "--continue")
-			cmd.Dir = dir
-			cmd.Env = append(os.Environ(),
-				"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-				"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
-				"GIT_EDITOR=true",
-			)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				return nil, fmt.Errorf("git rebase --continue: %s: %w", out, err)
-			}
-			return &agent.Result{
-				Output: json.RawMessage(`{"summary":"resolve merge conflict in shared.txt"}`),
-			}, nil
-		},
-	}
-
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Run.Branch = "refs/heads/feature"
-	sctx.Repo.UpstreamURL = upstream
-	sctx.Fixing = true
-	sctx.PreviousFindings = `{"findings":[{"severity":"warning","file":"other.txt","description":"merge conflict rebasing onto origin/feature"}]}`
-	sctx.UserIntent = "user wanted conflict resolution to preserve the extracted intent"
-
-	step := &RebaseStep{}
-	outcome, err := step.Execute(sctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if outcome.NeedsApproval {
-		t.Fatal("expected no approval after successful fix")
-	}
-	if len(ag.calls) != 1 {
-		t.Fatalf("expected 1 agent call, got %d", len(ag.calls))
-	}
-	if !strings.Contains(ag.calls[0].Prompt, "shared.txt") {
-		t.Error("expected agent prompt to mention conflicting file")
-	}
-	if strings.Contains(ag.calls[0].Prompt, "other.txt") && !strings.Contains(ag.calls[0].Prompt, "Current conflicted files") {
-		t.Fatalf("expected prompt to scope fixes using current conflicted files, got: %s", ag.calls[0].Prompt)
-	}
-	if !strings.Contains(ag.calls[0].Prompt, "user wanted conflict resolution to preserve the extracted intent") {
-		t.Fatalf("expected agent prompt to include extracted user intent, got: %s", ag.calls[0].Prompt)
-	}
-	if !strings.Contains(ag.calls[0].Prompt, dir) || !strings.Contains(ag.calls[0].Prompt, "Path contract:") {
-		t.Fatalf("expected agent prompt to include execution context with workdir, got: %s", ag.calls[0].Prompt)
-	}
-	assertTestQualityRulePrompt(t, ag.calls[0].Prompt)
-	// Verify rebase completed - feature is now ahead of origin/main
-	mergeBase := gitCmd(t, dir, "merge-base", "HEAD", "origin/main")
-	originMain := gitCmd(t, dir, "rev-parse", "origin/main")
-	if mergeBase != originMain {
-		t.Fatalf("merge-base = %s, want origin/main %s", mergeBase, originMain)
 	}
 }
 
@@ -323,7 +200,7 @@ func TestRebaseStep_ForkSyncsPushBranchBeforeDefaultBranch(t *testing.T) {
 	}
 }
 
-func TestRebaseStep_FixModeNonConflictFailureReturnsError(t *testing.T) {
+func TestRebaseStep_DirtyWorktreeFailsWithoutTouchingIt(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -332,10 +209,10 @@ func TestRebaseStep_FixModeNonConflictFailureReturnsError(t *testing.T) {
 	gitCmd(t, dir, "init")
 	gitCmd(t, dir, "config", "user.name", "test")
 	gitCmd(t, dir, "config", "user.email", "test@test.com")
-	// The test's premise is that a dirty worktree makes the rebase fail. An
-	// ambient global rebase.autoStash=true would silently stash and proceed,
-	// so pin it false in this repo regardless of the machine's git config.
-	gitCmd(t, dir, "config", "rebase.autoStash", "false")
+	// An ambient global merge.autoStash=true would stash the dirty file around
+	// the merge, so pin it false in this repo regardless of the machine's git
+	// config.
+	gitCmd(t, dir, "config", "merge.autoStash", "false")
 	gitCmd(t, dir, "checkout", "-b", "main")
 	gitCmd(t, dir, "remote", "add", "origin", upstream)
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("base\n"), 0o644)
@@ -350,7 +227,9 @@ func TestRebaseStep_FixModeNonConflictFailureReturnsError(t *testing.T) {
 	gitCmd(t, dir, "commit", "-m", "feature change")
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 
-	// Advance main so rebase is needed
+	// Advance main so a merge is needed. It touches a different file, so git
+	// itself would merge over the dirty one; the step must refuse instead,
+	// because its conflict restore resets the worktree.
 	gitCmd(t, dir, "checkout", "main")
 	os.WriteFile(filepath.Join(dir, "c.txt"), []byte("main\n"), 0o644)
 	gitCmd(t, dir, "add", "-A")
@@ -358,63 +237,8 @@ func TestRebaseStep_FixModeNonConflictFailureReturnsError(t *testing.T) {
 	gitCmd(t, dir, "push", "origin", "main")
 	gitCmd(t, dir, "checkout", "feature")
 
-	// Dirty the working tree so rebase fails without conflict
+	// Dirty the working tree.
 	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("dirty\n"), 0o644)
-
-	ag := &mockAgent{name: "test"}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Run.Branch = "refs/heads/feature"
-	sctx.Repo.UpstreamURL = upstream
-	sctx.Fixing = true
-
-	step := &RebaseStep{}
-	_, err := step.Execute(sctx)
-	if err == nil {
-		t.Fatal("expected error for non-conflict rebase failure")
-	}
-	if len(ag.calls) != 0 {
-		t.Errorf("expected 0 agent calls for non-conflict failure, got %d", len(ag.calls))
-	}
-}
-
-func TestRebaseStep_NonConflictFailureWithRebaseMetadataReturnsError(t *testing.T) {
-	t.Parallel()
-	upstream := t.TempDir()
-	gitCmd(t, upstream, "init", "--bare")
-
-	dir := t.TempDir()
-	gitCmd(t, dir, "init")
-	gitCmd(t, dir, "config", "user.name", "test")
-	gitCmd(t, dir, "config", "user.email", "test@test.com")
-	// See TestRebaseStep_FixModeNonConflictFailureReturnsError: an ambient
-	// global rebase.autoStash=true would defeat the dirty-worktree premise.
-	gitCmd(t, dir, "config", "rebase.autoStash", "false")
-	gitCmd(t, dir, "checkout", "-b", "main")
-	gitCmd(t, dir, "remote", "add", "origin", upstream)
-	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("base\n"), 0o644)
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "base commit")
-	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-	gitCmd(t, dir, "push", "origin", "main")
-
-	gitCmd(t, dir, "checkout", "-b", "feature")
-	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("feature\n"), 0o644)
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "feature change")
-	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-
-	gitCmd(t, dir, "checkout", "main")
-	os.WriteFile(filepath.Join(dir, "c.txt"), []byte("main\n"), 0o644)
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "main advance")
-	gitCmd(t, dir, "push", "origin", "main")
-	gitCmd(t, dir, "checkout", "feature")
-
-	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("dirty\n"), 0o644)
-	rebaseMergeDir := gitCmd(t, dir, "rev-parse", "--git-path", "rebase-merge")
-	if err := os.MkdirAll(rebaseMergeDir, 0o755); err != nil {
-		t.Fatalf("mkdir rebase metadata: %v", err)
-	}
 
 	ag := &mockAgent{name: "test"}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
@@ -422,18 +246,18 @@ func TestRebaseStep_NonConflictFailureWithRebaseMetadataReturnsError(t *testing.
 	sctx.Repo.UpstreamURL = upstream
 
 	step := &RebaseStep{}
-	outcome, err := step.Execute(sctx)
-	if err == nil {
-		t.Fatal("expected error for non-conflict rebase failure")
-	}
-	if outcome != nil {
-		t.Fatalf("expected no outcome on error, got %#v", outcome)
+	_, err := step.Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
+		t.Fatalf("Execute error = %v, want it to refuse the dirty worktree", err)
 	}
 	if len(ag.calls) != 0 {
-		t.Fatalf("expected 0 agent calls, got %d", len(ag.calls))
+		t.Errorf("expected 0 agent calls, got %d", len(ag.calls))
 	}
-	if strings.Contains(gitStatusPorcelain(t, dir), "UU") {
-		t.Fatal("expected no unmerged files")
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("head = %s, want %s untouched", got, headSHA)
+	}
+	if content, err := os.ReadFile(filepath.Join(dir, "b.txt")); err != nil || string(content) != "dirty\n" {
+		t.Fatalf("dirty b.txt = %q (err %v), want the uncommitted change kept", content, err)
 	}
 }
 
@@ -494,7 +318,10 @@ func TestRebaseStep_LogFileNotVisibleToUser(t *testing.T) {
 	}
 }
 
-func TestRebaseStep_RemapsUncertifiedRangeWhenHeadRewritten(t *testing.T) {
+// A merge keeps the uncertified fixer range's commits on the branch under their
+// own SHAs, so the recorded range stays exactly as it was and still binds to
+// the merged head; nothing has to be remapped.
+func TestRebaseStep_MergeKeepsTheUncertifiedRangeBindable(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -542,18 +369,15 @@ func TestRebaseStep_RemapsUncertifiedRangeWhenHeadRewritten(t *testing.T) {
 	}
 	newHead := gitCmd(t, dir, "rev-parse", "HEAD")
 	if newHead == toSHA {
-		t.Fatal("rebase did not rewrite the uncertified head")
+		t.Fatal("the moved base was not merged")
 	}
 
 	got, err := sctx.DB.GetUncertifiedPipelineRange(sctx.Repo.ID, sctx.Run.Branch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got == nil || got.FromSHA == fromSHA || got.ToSHA == toSHA {
-		t.Fatalf("updateHeadSHA left old uncertified SHAs: %#v (old from=%s to=%s)", got, fromSHA, toSHA)
-	}
-	if got.ToSHA != newHead || got.SourceRunID != sctx.Run.ID {
-		t.Fatalf("remapped range = %#v, want to=%s source=%s", got, newHead, sctx.Run.ID)
+	if got == nil || got.FromSHA != fromSHA || got.ToSHA != toSHA {
+		t.Fatalf("uncertified range = %#v, want it unchanged at %s..%s", got, fromSHA, toSHA)
 	}
 
 	bind := &pipeline.StepContext{
@@ -564,55 +388,8 @@ func TestRebaseStep_RemapsUncertifiedRangeWhenHeadRewritten(t *testing.T) {
 		WorkDir: dir,
 	}
 	pipeline.BindUncertifiedPipelineRange(bind)
-	if bind.UncertifiedFromSHA != got.FromSHA || bind.UncertifiedToSHA != got.ToSHA {
-		t.Fatalf("bind after rebase remap from=%q to=%q, want from=%q to=%q", bind.UncertifiedFromSHA, bind.UncertifiedToSHA, got.FromSHA, got.ToSHA)
-	}
-}
-
-func TestRebaseStep_HangingConflictAgentFailsAfterTimeout(t *testing.T) {
-	t.Parallel()
-	upstream := t.TempDir()
-	gitCmd(t, upstream, "init", "--bare")
-
-	dir := t.TempDir()
-	gitCmd(t, dir, "init")
-	gitCmd(t, dir, "config", "user.name", "test")
-	gitCmd(t, dir, "config", "user.email", "test@test.com")
-	gitCmd(t, dir, "checkout", "-b", "main")
-	gitCmd(t, dir, "remote", "add", "origin", upstream)
-	os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("base\n"), 0o644)
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "base commit")
-	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-	gitCmd(t, dir, "push", "origin", "main")
-
-	gitCmd(t, dir, "checkout", "-b", "feature")
-	os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("feature-origin\n"), 0o644)
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "feature origin change")
-	gitCmd(t, dir, "push", "origin", "feature")
-
-	gitCmd(t, dir, "reset", "--soft", "HEAD~1")
-	os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("feature-local\n"), 0o644)
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "feature local change")
-	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-
-	ag := &mockAgent{
-		name: "hanging-rebase-agent",
-		runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
-			<-ctx.Done()
-			return &agent.Result{Output: json.RawMessage(`{"summary":"resolve conflicts"}`)}, nil
-		},
-	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Run.Branch = "refs/heads/feature"
-	sctx.Repo.UpstreamURL = upstream
-	sctx.Fixing = true
-	sctx.Config.AgentTimeout = 20 * time.Millisecond
-
-	if _, err := (&RebaseStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), "timed out after 20ms") {
-		t.Fatalf("hanging rebase agent error = %v, want timeout", err)
+	if bind.UncertifiedFromSHA != fromSHA || bind.UncertifiedToSHA != toSHA {
+		t.Fatalf("bind after the merge from=%q to=%q, want from=%q to=%q", bind.UncertifiedFromSHA, bind.UncertifiedToSHA, fromSHA, toSHA)
 	}
 }
 
@@ -668,7 +445,10 @@ func TestRebaseStep_BaseFetchFailureFailsBeforeRewritingHead(t *testing.T) {
 	}
 }
 
-func TestRebaseStep_BaseUnreachableAfterRebaseStillCompletesTheStep(t *testing.T) {
+// Execute fetches the base before integrating, so once the merge has moved
+// HEAD nothing may fetch again: a failure then could not undo the merge that
+// was already persisted.
+func TestRebaseStep_BaseUnreachableAfterMergeStillCompletesTheStep(t *testing.T) {
 	t.Parallel()
 	upstreamParent := t.TempDir()
 	upstream := filepath.Join(upstreamParent, "upstream.git")
@@ -680,74 +460,52 @@ func TestRebaseStep_BaseUnreachableAfterRebaseStillCompletesTheStep(t *testing.T
 	gitCmd(t, dir, "config", "user.email", "test@test.com")
 	gitCmd(t, dir, "checkout", "-b", "main")
 	gitCmd(t, dir, "remote", "add", "origin", upstream)
-	if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("base content\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeFixtureFile(t, dir, "shared.txt", "base content\n")
 	gitCmd(t, dir, "add", "-A")
 	gitCmd(t, dir, "commit", "-m", "base commit")
 	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "push", "origin", "main")
 
 	gitCmd(t, dir, "checkout", "-b", "feature")
-	if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("feature change\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeFixtureFile(t, dir, "feature.txt", "feature change\n")
 	gitCmd(t, dir, "add", "-A")
 	gitCmd(t, dir, "commit", "-m", "feature change")
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 
 	gitCmd(t, dir, "checkout", "main")
-	if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("main change\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeFixtureFile(t, dir, "main.txt", "main change\n")
 	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "main conflict")
+	gitCmd(t, dir, "commit", "-m", "main change")
 	gitCmd(t, dir, "push", "origin", "main")
 	gitCmd(t, dir, "checkout", "feature")
 
-	// The agent resolves the conflict, then the upstream becomes unreachable:
-	// any base-branch fetch after the rebase rewrote HEAD would now fail.
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("resolved content\n"), 0o644); err != nil {
-				return nil, err
-			}
-			gitCmd(t, dir, "add", "shared.txt")
-			cmd := exec.Command("git", "rebase", "--continue")
-			cmd.Dir = dir
-			cmd.Env = append(os.Environ(),
-				"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-				"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
-				"GIT_EDITOR=true",
-			)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				return nil, fmt.Errorf("git rebase --continue: %s: %w", out, err)
-			}
-			if err := os.Rename(upstream, upstream+".gone"); err != nil {
-				return nil, err
-			}
-			return &agent.Result{Output: json.RawMessage(`{"summary":"resolve conflict"}`)}, nil
-		},
-	}
-
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, noAgent(t), dir, baseSHA, headSHA, config.Commands{})
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Repo.UpstreamURL = upstream
-	sctx.Fixing = true
+	// The upstream becomes unreachable the moment the merge starts: any
+	// base-branch fetch after it would now fail.
+	log := sctx.Log
+	sctx.Log = func(line string) {
+		if strings.HasPrefix(line, "merging ") {
+			if err := os.Rename(upstream, upstream+".gone"); err != nil {
+				t.Error(err)
+			}
+		}
+		log(line)
+	}
 
 	if _, err := (&RebaseStep{}).Execute(sctx); err != nil {
-		t.Fatalf("rebase step failed after HEAD was rewritten and persisted: %v", err)
+		t.Fatalf("rebase step failed after HEAD was merged and persisted: %v", err)
 	}
-	rebased := gitCmd(t, dir, "rev-parse", "HEAD")
-	if rebased == headSHA {
-		t.Fatal("HEAD was not rebased")
+	merged := gitCmd(t, dir, "rev-parse", "HEAD")
+	if merged == headSHA {
+		t.Fatal("HEAD was not merged")
 	}
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.HeadSHA != rebased {
-		t.Fatalf("persisted head = %s, want rebased head %s", run.HeadSHA, rebased)
+	if run.HeadSHA != merged {
+		t.Fatalf("persisted head = %s, want merged head %s", run.HeadSHA, merged)
 	}
 }

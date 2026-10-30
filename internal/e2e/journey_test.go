@@ -1236,7 +1236,10 @@ func assertNonEmptyDiffAfterRebaseRun(t *testing.T, h *Harness) {
 		t.Fatalf("non-empty-after-rebase run did not complete: status=%s error=%v", run.Status, deref(run.Error))
 	}
 	if run.HeadSHA == branchHead {
-		t.Fatalf("expected rebase to rewrite head SHA, still %s", run.HeadSHA)
+		t.Fatalf("expected the moved base to be merged, head still %s", run.HeadSHA)
+	}
+	if !isAncestorIn(t, h, h.UpstreamDir, branchHead, run.HeadSHA) {
+		t.Fatalf("published head %s does not keep the submitted head %s: the base was not merged", run.HeadSHA, branchHead)
 	}
 	mergeBase, err := h.runGit(ctx, h.UpstreamDir, "merge-base", "refs/heads/non-empty-after-rebase", "refs/heads/main")
 	if err != nil {

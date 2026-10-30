@@ -40,7 +40,7 @@ func DemoSteps() []pipeline.Step {
 			name:       types.StepRebase,
 			delay:      6 * time.Second,
 			displayDur: 8 * time.Second,
-			log:        "Fetching origin...\nChecking default branch...\nRebasing onto origin/main...\nAlready up to date.",
+			log:        "Fetching origin...\nChecking default branch...\nAlready up to date with origin/main.",
 		},
 		&demoStep{
 			name:          types.StepReview,

@@ -41,7 +41,7 @@ This context is advisory and fails open. It tells agents not to implement or re-
 ## Intent
 
 Uses explicit intent when a run provides it, including exact explicit intent inherited by a rerun, otherwise infers the author's intent from recent local Claude Code, Codex, OpenCode, Rovo Dev, Pi, or GitHub Copilot CLI transcripts.
-This is best-effort context, and when available it is included in rebase fixes, review checks and fixes, test detection, evidence validation, and fixes, documentation checks and fixes, lint detection and fixes, CI auto-fixes, and PR drafting.
+This is best-effort context, and when available it is included in review checks and fixes, test detection, evidence validation, and fixes, documentation checks and fixes, lint detection and fixes, CI auto-fixes, and PR drafting.
 
 **Behavior:**
 
@@ -58,31 +58,33 @@ It can fail the run only if cleanup fails after the disambiguation agent leaves 
 
 ## Rebase
 
-Fetches the latest authoritative remote state, fetches the configured pushed-branch target, and integrates your branch with those refs - by rebasing onto them, or by merging them in when [`rebase.strategy: merge`](/no-mistakes/reference/repo-config/#rebasestrategy) is configured.
+Fetches the latest authoritative remote state, fetches the configured pushed-branch target, and integrates your branch with those refs by merging them in.
+Despite the step's name it never rebases: every commit already on your branch keeps its SHA, so publication is a fast-forward and an open PR's history is never rewritten.
 
 The integration branch used below is the [PR base branch](/no-mistakes/reference/repo-config/#prbase_branch): the repository's forge default branch, or the trusted [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) when configured.
 
 **Behavior:**
-- Fetches `origin/<PR base branch>` from the remote into the worktree, and also fetches the pushed branch for non-base branches unless the push rewrote branch history. A failed base-branch fetch fails the step before any rebase or head update, rather than integrating against a possibly stale cached `origin/<PR base branch>`; the post-integration empty-diff check reuses that same fetched ref
+- If the run worktree was left mid-merge or mid-rebase by an interrupted earlier attempt, aborts that operation and verifies the worktree is back on the head it started from before doing anything else; a restore that does not land exactly there fails the step
+- Fetches `origin/<PR base branch>` from the remote into the worktree, and also fetches the pushed branch for non-base branches unless the push rewrote branch history. A failed base-branch fetch fails the step before any merge or head update, rather than integrating against a possibly stale cached `origin/<PR base branch>`; the post-integration empty-diff check reuses that same fetched ref
 - Without fork routing, the pushed-branch target is `origin/<branch>`
 - With GitHub fork routing, the pushed-branch target is the fork branch fetched into `refs/remotes/no-mistakes-push/<branch>`
-- If the branch is not the PR base branch, tries rebasing onto the pushed-branch target first, then `origin/<PR base branch>`
-- If the push rewrote branch history, skips the pushed-branch rebase target so prior remote autofix commits do not get reintroduced
+- If the branch is not the PR base branch, integrates the pushed-branch target first, then `origin/<PR base branch>`
+- If the push rewrote branch history, skips the pushed-branch target so prior remote autofix commits do not get reintroduced
 - If the push rewrote the PR base branch and `origin/<PR base branch>` advanced after that rewrite, pauses for manual approval before updating the branch
 - If the local default tip equals the branch `HEAD`, treats those local-only commits as the intended delivery work and continues
 - If the local default tip is a strict ancestor of the branch `HEAD`, pauses with an `ask-user` finding instead of silently bundling potentially unrelated local work into the PR
 - The local-default check is best-effort and only fires when the local default tip is ahead of `origin/<PR base branch>` and a strict ancestor of the branch `HEAD`
 - Skips targets that don't exist or are already ancestors
-- If a fast-forward is possible, does a hard-reset instead of a rebase
-- If the diff against the PR base branch is empty after rebase, completes rebase and skips all remaining pipeline steps
-- On conflict: records conflicting files, aborts the rebase, and reports findings
-- Under [`rebase.strategy: merge`](/no-mistakes/reference/repo-config/#rebasestrategy), every step above is unchanged except the integration itself: each target is merged with `git merge --no-ff` rather than rebased onto, so the head the pipeline reviewed stays on the branch as the merge commit's first parent, publication is a fast-forward rather than a force-push, and the merge commit's two parents keep the conflict resolution auditable afterwards. The skip, fast-forward, force-push and bundled-local-commit rules are the same in both strategies
-- Under [`rebase.strategy: merge`](/no-mistakes/reference/repo-config/#rebasestrategy), a repaired conflict must leave the merge behind: after the agent finishes, the step checks that the branch moved and that both the head it started from and the fetched target are in the resulting history, and fails the step if the agent ended the conflict any other way - leaving the merge unconcluded, leaving a rebase in progress, aborting it, or replacing it with a rebase or a reset onto the target - rather than recording an integration that did not happen. A rejected shape is not left checked out: the worktree is reset back to the head that integration started from before the failure is reported, and a restore that does not land exactly there, or that leaves an interrupted rebase underneath it, is reported inside the same error rather than described as recovered
-- Bounds the conflict-repair agent with [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout): an expired budget cancels the agent and fails the step with a timeout diagnostic rather than leaving the run active indefinitely
+- If the branch is strictly behind a target, fast-forwards to it
+- Otherwise merges the target's tip commit with `git merge --no-ff --no-edit`, so the head the pipeline reviewed stays on the branch as the merge commit's first parent; the step checks the result is a merge commit of exactly those two commits and fails rather than carry anything else forward
+- Refuses to merge into a run worktree with uncommitted changes to tracked files, and leaves them in place
+- If the diff against the PR base branch is empty after integrating, completes the step and skips all remaining pipeline steps
+- On conflict: aborts the merge, puts the branch back exactly where the step found it (a target that merged cleanly before or after the conflicting one is undone too), and parks with one `ask-user` finding per conflicted file that names the target and the remedy: merge it into your branch locally, resolve, and push. No agent is ever asked to resolve a merge conflict
+- The operator's own merge and push starts a new run
 
-**Auto-fix:** when enabled, the agent resolves conflict markers, stages files, and runs `git rebase --continue` (or, under `rebase.strategy: merge`, `git commit --no-edit`) in a non-interactive Git environment so Git accepts the existing commit message instead of opening an editor. The prompt includes user intent when available. Manual fix rounds also include any per-conflict user notes, any selected user-authored findings from the TUI or AXI interface, and sanitized prior-round history in the prompt. The Rebase step does not synthesize a fix commit subject; `git rebase --continue` preserves the rebased commits' subjects. Under `rebase.strategy: merge` the resolver prompt additionally requires an **additive** resolution - keep both sides' introduced content, never delete what one side introduced merely to make the merge apply - because the resulting merge commit is what makes that claim checkable afterwards. The step does not synthesize a merge subject either; `--no-edit` keeps Git's own `Merge remote-tracking branch ...` message.
+**Fix rounds:** selecting fix at a conflict gate re-runs the same deterministic merge and nothing else. It lands if the target no longer conflicts, and otherwise parks again on the same files.
 
-**Default auto-fix limit:** `3`.
+**Auto-fix:** none. Every finding this step reports is `ask-user`, so [`auto_fix.rebase`](/no-mistakes/reference/global-config/#auto_fix) is accepted and has no effect.
 
 ## Review
 

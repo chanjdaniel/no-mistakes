@@ -56,7 +56,7 @@ That directory is always outside the worktree and is reaped by no-mistakes on a 
 
 A complete gate never degrades silently when its configured pipeline agent is unavailable.
 The daemon resolves the effective agent before creating pipeline step records, and the run fails immediately with setup guidance if the configured binary cannot run.
-This refusal also applies when deterministic test or lint commands are configured because review and documentation always require agent judgment, while rebase, PR, and CI paths may need an agent to resolve conflicts, generate content, or fix failures.
+This refusal also applies when deterministic test or lint commands are configured because review and documentation always require agent judgment, while PR and CI paths may need an agent to generate content or repair CI.
 
 | Surface or capability | Works without a runnable pipeline agent? | Behavior |
 | --- | ---: | --- |

@@ -12,7 +12,7 @@ import (
 
 // Issue #283: a gated branch built on top of a local default branch that is
 // ahead of origin carries that other workstream's committed-but-unpushed
-// commits. Rebasing onto the fresh remote default branch keeps them in the
+// commits. Merging the fresh remote default branch keeps them in the
 // branch's history, so the PR silently bundles unrelated work.
 //
 // The rebase step must detect that the branch carries commits which exist on

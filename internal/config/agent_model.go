@@ -20,11 +20,12 @@ const agentModelHarness = types.AgentOpenCode
 // without its own key falls back to its step's key (see AgentModelFor).
 //
 // The step keys are every built-in step that invokes an agent (push never
-// does; custom gate steps are out of scope). The fix-round keys are the fix
+// does; custom gate steps are out of scope), plus rebase: the Rebase step
+// invokes no agent since it only merges, but live configs still set the key,
+// so it keeps loading and routes nothing. The fix-round keys are the fix
 // rounds that are their own agent invocation, with a purpose of <step>-fix:
-// review, test and lint (executeFixMode) and the CI repair. Rebase's conflict
-// resolution runs only in its fix round but is that step's only invocation, so
-// its step key already routes it; document has no fix round of its own.
+// review, test and lint (executeFixMode) and the CI repair; document has no
+// fix round of its own.
 var agentModelKeys = []string{
 	string(types.StepIntent),
 	string(types.StepRebase),

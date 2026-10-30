@@ -82,9 +82,10 @@ ci:
   revalidate_repairs: false
 
 # How a base branch that moved under your branch is integrated.
-# Read only from the trusted default branch.
+# Read only from the trusted default branch. merge is the default and the
+# only accepted value; rebase is refused.
 rebase:
-  strategy: rebase # or: merge
+  strategy: merge
 
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
@@ -205,7 +206,7 @@ Select the branch that newly created pull requests target.
 | Trust | Trusted default branch, unless `allow_repo_commands: true` is explicitly enabled there |
 
 Use this when the repository's integration branch differs from its forge default branch, for example `develop` instead of `main`.
-The configured branch is used for PR creation, and as the integration base for the rebase step.
+The configured branch is used for PR creation, and as the integration base for the Rebase step.
 When unset, no-mistakes preserves the existing behavior and targets `Repo.DefaultBranch`.
 
 PR lookup matches an existing PR by branch alone, never filtered by base, so a `pr.base_branch` change after a PR was opened updates that PR instead of opening a duplicate against the new base.
@@ -581,7 +582,7 @@ Override auto-fix attempt limits for specific steps. Fields not set here inherit
 
 | Field | Type | Default |
 | --- | --- | --- |
-| `auto_fix.rebase` | `int` | Inherits from global (default `3`) |
+| `auto_fix.rebase` | `int` | Inherits from global (default `3`); accepted and has no effect, because every Rebase finding is `ask-user` |
 | `auto_fix.review` | `int` | Inherits from global (default `0`) |
 | `auto_fix.test` | `int` | Inherits from global (default `3`) |
 | `auto_fix.document` | `int` | Inherits from global (default `3`) |
@@ -712,11 +713,12 @@ With no trusted copy of this file, the operator's global value applies, then the
 ### rebase.strategy
 
 How the [Rebase step](/no-mistakes/reference/pipeline-steps/#rebase) integrates a base branch that moved under the gated branch.
+This fork only ever merges, so the key exists to keep existing configs loading and to refuse the retired rewriting shape.
 
 | | |
 |---|---|
-| Type | `string` (`rebase` or `merge`) |
-| Default | `rebase` |
+| Type | `string` (`merge`) |
+| Default | `merge` |
 | Trust | Read only from the trusted default branch |
 
 ```yaml
@@ -724,31 +726,23 @@ rebase:
   strategy: merge
 ```
 
-**Opting in.** Commit that block to your **default branch** (the same copy the daemon reads `commands` and `agent` from). It takes effect on the next run of every branch in the repository; a branch cannot opt itself in or out. The default stays `rebase` for every repository that does not ask, so upgrading no-mistakes never changes the shape of history under you.
+- **`merge`** (the default and the only accepted value) integrates the base with a `git merge --no-ff` commit whose **first parent** is the head the pipeline reviewed.
+- **`rebase`** fails the config closed with a message saying the gate integrates a moved base only by merging, in the global config and the trusted repository config alike, so no repository silently gets the rewriting behaviour back. Any other value fails closed too.
 
-- **`rebase` (default)** replays the branch's commits on top of the new base. This is the historical behavior and is unchanged.
-- **`merge`** integrates the base with a `git merge --no-ff` commit whose **first parent** is the head the pipeline reviewed.
+What the merge shape keeps:
 
-The two differ in what survives the integration, which matters in three places:
+- **The reviewed head** stays on the branch as the merge commit's first parent, and every commit already on the branch keeps its SHA.
+- **Publication** is a fast-forward: an open PR's head is appended to, never rewritten, and no push needs `--force`. A CI merge-conflict repair is the exception: it still rebases onto the base branch, so that repair still force-pushes and still revalidates in full.
+- **Continuity.** The CI step publishes a repair without a full revalidation cycle only when it can prove the repaired head continues the reviewed head (see [`ci.revalidate_repairs`](#cirevalidate_repairs)). After a merge that proof is plain ancestry, because the reviewed head is a parent.
+- **Attestation.** A review attestation that binds to an exact commit SHA survives a merge, because the attested commit stays in the branch's history.
 
-| | `rebase` (default) | `merge` |
-|---|---|---|
-| The reviewed head after integration | rewritten; no longer exists on the branch | still on the branch, as the first parent |
-| Publication | force-push; an open PR's head is rewritten | fast-forward; the PR's head is appended to |
-| Evidence of what a conflict resolution did | none; the result is just commits | the merge commit's two parents and their merge base |
-| Cost | none | one merge commit per integration |
-
-Integration publishes as a fast-forward under `merge`. A CI merge-conflict repair is the exception: it rebases onto the base branch whichever strategy is set, so that repair still force-pushes and still revalidates in full.
-
-**Continuity.** The CI step publishes a repair without a full revalidation cycle only when it can prove the repaired head continues the reviewed head (see [`ci.revalidate_repairs`](#cirevalidate_repairs)). Under `merge` that proof is plain ancestry, because the reviewed head is a parent. Under `rebase` there is nothing to prove it with.
-
-**Attestation.** A review attestation that binds to an exact commit SHA survives a merge, because the attested commit stays in the branch's history. A rebase rewrites every branch SHA, so the attested commit no longer exists on the branch.
-
-**Audit.** Whether a conflict resolution deleted content one side introduced is decidable from a merge commit alone - its two parents and their merge base are all the inputs - by anything, afterwards, from outside no-mistakes. A rebase leaves no such record, so the same question is unanswerable once the run ends. To match, the conflict resolver's prompt under `merge` requires an **additive** resolution: keep both sides' introduced content, and never delete what one side introduced merely to make the merge apply. Only genuinely mutually exclusive changes may supersede one another, and the agent must say which and why.
+**Conflicts are the operator's.** A base that does not merge cleanly is never resolved by no-mistakes: the step parks with one `ask-user` finding per conflicted file, and the branch is left exactly where it was.
+Merge the base into your branch locally, resolve, and push; that push starts a new run.
+The resolution is then your own merge commit, whose two parents and their merge base show what it kept from each side.
 
 **The cost is a merge commit per integration.** On a squash-merged default branch (one commit per PR) those commits collapse at landing and never reach it. On a merge-committed one they do, so the history is a graph rather than a line.
 
-This value is read only from the trusted default-branch copy of this file, regardless of [`allow_repo_commands`](#allow_repo_commands). It decides whether integrating a moved base leaves auditable evidence behind, so a pushed branch must not be able to change it in either direction. A value set here wins over the operator's own [`rebase.strategy`](/no-mistakes/reference/global-config/#rebasestrategy).
+This value is read only from the trusted default-branch copy of this file, regardless of [`allow_repo_commands`](#allow_repo_commands); a pushed branch's copy is never read. A value set here wins over the operator's own [`rebase.strategy`](/no-mistakes/reference/global-config/#rebasestrategy).
 
 ### commit.fix_message
 
