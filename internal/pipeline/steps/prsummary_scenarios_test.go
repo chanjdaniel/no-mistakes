@@ -48,7 +48,7 @@ func testStepWithFindings(t *testing.T, findingsJSON string) ([]*db.StepResult, 
 func TestBuildTestingSummary_RendersScenarioTableAndVerdict(t *testing.T) {
 	t.Parallel()
 	findingsJSON := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"},
+		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "after paying, the success screen shows the order number"},
 		{Name: "declined payment shows the retry copy", Result: types.ScenarioResultUntested, Reason: "no card sandbox credential on this machine"},
 	}, types.TestVerdictGo)
 	steps, rounds := testStepWithFindings(t, findingsJSON)
@@ -58,7 +58,7 @@ func TestBuildTestingSummary_RendersScenarioTableAndVerdict(t *testing.T) {
 	for _, want := range []string{
 		"Live validation: ✅ go - 1 of 2 scenarios driven live against the product",
 		"| Scenario | Result | Live | Evidence |",
-		"| user reaches the success screen | ✅ pass | live | checkout.png |",
+		"| user reaches the success screen | ✅ pass | live | after paying, the success screen shows the order number |",
 		// An untested scenario appears with the capability that stopped it,
 		// which is the whole point of reporting it instead of hiding it.
 		"| declined payment shows the retry copy | ⏸️ untested | no | no card sandbox credential on this machine |",
@@ -72,7 +72,7 @@ func TestBuildTestingSummary_RendersScenarioTableAndVerdict(t *testing.T) {
 func TestBuildTestingSummary_NoGoVerdictIsVisible(t *testing.T) {
 	t.Parallel()
 	findingsJSON := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "user reaches the success screen", Result: types.ScenarioResultFail, Live: true, Evidence: "checkout.png"},
+		{Name: "user reaches the success screen", Result: types.ScenarioResultFail, Live: true, Evidence: "paying shows an error banner instead of the success screen"},
 	}, types.TestVerdictNoGo)
 	steps, rounds := testStepWithFindings(t, findingsJSON)
 
@@ -80,7 +80,7 @@ func TestBuildTestingSummary_NoGoVerdictIsVisible(t *testing.T) {
 	if !strings.Contains(md, "Live validation: ❌ no-go - 1 of 1 scenarios driven live against the product") {
 		t.Errorf("expected the no-go verdict rendered, got:\n%s", md)
 	}
-	if !strings.Contains(md, "| user reaches the success screen | ❌ fail | live | checkout.png |") {
+	if !strings.Contains(md, "| user reaches the success screen | ❌ fail | live | paying shows an error banner instead of the success screen |") {
 		t.Errorf("expected the failing scenario row, got:\n%s", md)
 	}
 }
@@ -122,7 +122,7 @@ func TestBuildTestingSummary_PreContractRunRendersUnchanged(t *testing.T) {
 func TestBuildPipelineSummary_OmitsLiveValidationAfterHeadChanges(t *testing.T) {
 	t.Parallel()
 	findingsJSON := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"},
+		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "after paying, the success screen shows the order number"},
 	}, types.TestVerdictGo)
 	steps, rounds := testStepWithFindings(t, findingsJSON)
 
@@ -135,7 +135,7 @@ func TestBuildPipelineSummary_OmitsLiveValidationAfterHeadChanges(t *testing.T) 
 func TestBuildPipelineSummary_StepFoldCarriesScenarioTable(t *testing.T) {
 	t.Parallel()
 	findingsJSON := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"},
+		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "after paying, the success screen shows the order number"},
 	}, types.TestVerdictGo)
 	steps, rounds := testStepWithFindings(t, findingsJSON)
 
@@ -143,7 +143,7 @@ func TestBuildPipelineSummary_StepFoldCarriesScenarioTable(t *testing.T) {
 	if !strings.Contains(md, "Live validation: ✅ go") {
 		t.Errorf("expected the verdict inside the Pipeline fold, got:\n%s", md)
 	}
-	if !strings.Contains(md, "| user reaches the success screen | ✅ pass | live | checkout.png |") {
+	if !strings.Contains(md, "| user reaches the success screen | ✅ pass | live | after paying, the success screen shows the order number |") {
 		t.Errorf("expected the scenario table inside the Pipeline fold, got:\n%s", md)
 	}
 }
@@ -177,7 +177,7 @@ func TestBuildTestingSummary_ScenarioCellsCannotBreakTheTable(t *testing.T) {
 func TestBuildPipelineSummary_ScenarioTableRendersOnBitbucket(t *testing.T) {
 	t.Parallel()
 	findingsJSON := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"},
+		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "after paying, the success screen shows the order number"},
 	}, types.TestVerdictGo)
 	steps, rounds := testStepWithFindings(t, findingsJSON)
 
@@ -185,7 +185,7 @@ func TestBuildPipelineSummary_ScenarioTableRendersOnBitbucket(t *testing.T) {
 	if strings.Contains(md, "<details>") {
 		t.Fatalf("bitbucket body must carry no HTML, got:\n%s", md)
 	}
-	if !strings.Contains(md, "| user reaches the success screen | ✅ pass | live | checkout.png |") {
+	if !strings.Contains(md, "| user reaches the success screen | ✅ pass | live | after paying, the success screen shows the order number |") {
 		t.Errorf("expected the scenario table on bitbucket, got:\n%s", md)
 	}
 }
