@@ -572,8 +572,10 @@ func (s *Service) BindRecoveryArchive(ctx context.Context, archiveRef string) St
 // unpublished commits. While such a run was active the pipeline_owned block
 // was correct; once it is terminal nothing will ever publish the head, so an
 // explicit guarded exit must exist. A terminal run whose verified worktree
-// head never changed from the submitted head needs no recovery at all, so
-// Recover treats that user_owned state as an idempotent no-op success.
+// head never changed from the submitted head, or whose only commits the local
+// head lacks are merges it already made itself (releasedByLocalMerges), needs
+// no recovery at all, so Recover treats that user_owned state as an idempotent
+// no-op success.
 //
 // The decision matrix, by worktree relation to the preserved pipeline head P
 // (the terminally verified run head, pinned by its private recovery ref):
@@ -1551,6 +1553,16 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 			if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) {
 				continue
 			}
+			// A run whose only unpublished commits are merges the local head
+			// already made itself released the branch: it is selectable like a
+			// released unmoved run below, and an older run that still holds
+			// pipeline content wins over it.
+			if s.releasedByLocalMerges(ctx, candidate, head) {
+				if run == nil {
+					run = candidate
+				}
+				continue
+			}
 			run = candidate
 			break
 		}
@@ -1601,6 +1613,10 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		if run.SubmittedHeadSHA != nil && run.HeadSHA != ptr(run.SubmittedHeadSHA) {
 			if run.CustodyReturnedAt != nil {
 				s.classifyCustodyReturned(ctx, &state)
+				return state, run, true
+			}
+			if s.releasedByLocalMerges(ctx, run, head) {
+				s.classifyUserOwned(ctx, &state)
 				return state, run, true
 			}
 			s.classifyPipelineOwned(ctx, &state, run, "the pipeline head has moved but has not been successfully pushed; do not make local follow-up commits yet")
@@ -2129,8 +2145,13 @@ func (s *Service) recoverySourceAvailable(ctx context.Context, state *State, run
 	}
 
 	ordinaryAvailable := localEligible
-	if !ordinaryAvailable && gateAvailable && objectExists(ctx, gateDir, preserved) && state.Local.Clean && objectExists(ctx, gateDir, local) {
-		ordinaryAvailable = isAncestor(ctx, gateDir, local, preserved) || preservedContainsLocalWork(ctx, gateDir, local, preserved)
+	if !ordinaryAvailable && gateAvailable && state.Local.Clean {
+		// The local head need not be in the gate: an operator's own commit
+		// (a hand merge of a moved base) is usually only in the worktree, and
+		// Recover fetches the preserved head before running the same proof.
+		if gateCtx, proofDir, ok := s.gateWithLocalObjects(ctx); ok && objectExists(gateCtx, proofDir, preserved) && objectExists(gateCtx, proofDir, local) {
+			ordinaryAvailable = isAncestor(gateCtx, proofDir, local, preserved) || preservedContainsLocalWork(gateCtx, proofDir, local, preserved)
+		}
 	}
 	if ordinaryAvailable {
 		return recoverySourceProof{

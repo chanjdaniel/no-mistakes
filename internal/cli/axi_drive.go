@@ -643,7 +643,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 	}
 	reconciliation, err := gate.ReconcileStaleBranch(ctx, env.p.RepoDir(env.repo.ID), ".", branch, submissionHead, "")
 	if err != nil {
-		return "", fmt.Errorf("prepare private mirror for %q: %w", branch, err)
+		return "", fmt.Errorf("prepare private mirror for %q: %w; run `no-mistakes axi status` and follow its exact `branch_sync.next_action.command`", branch, err)
 	}
 	// A reconciled branch is re-created by this push, so the hook reports no
 	// previous head. Carry the archived pre-reconciliation head so the run's
