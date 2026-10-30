@@ -111,7 +111,10 @@ func wrapPRAppendix(appendix string) string {
 }
 
 // composeOwnedPRContent uses the same publication redaction owner as ordinary
-// drafting, BEFORE stamping the byte-integrity guard. No clamp or heading-based
+// drafting, BEFORE stamping the byte-integrity guard, and neutralizes media in
+// the generated appendix and title the same way (neutralizePRContent). parts
+// may be author-owned live text, so it is never neutralized here; a generated
+// narrative is neutralized by the caller that drafted it. No clamp or heading-based
 // stripper may run here: if author text and all recorded evidence cannot fit,
 // publication fails. That includes suffix text/closing lines added after the
 // generated block. Model-authored copies of ownership markers in evidence are
@@ -124,11 +127,12 @@ func composeOwnedPRContent(parts prOwnedBody, title, appendix string, bodyLimit 
 		i := strings.LastIndex(marker, "-")
 		return marker[:i] + "\\" + marker[i:]
 	})
-	appendix = redactPRContent(prContent{Body: appendix}).Body
+	generated := redactPRContent(neutralizePRContent(prContent{Title: title, Body: appendix}))
+	appendix = generated.Body
 	if !parts.managed && before != "" {
 		before += "\n\n"
 	}
-	content := prContent{Title: redactPRContent(prContent{Title: title}).Title, Body: before + wrapPRAppendix(appendix) + after}
+	content := prContent{Title: generated.Title, Body: before + wrapPRAppendix(appendix) + after}
 	if err := validateOwnedPRBudget(content.Body, bodyLimit); err != nil {
 		return prContent{}, err
 	}

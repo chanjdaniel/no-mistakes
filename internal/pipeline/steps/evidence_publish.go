@@ -14,12 +14,10 @@ import (
 // evidenceLinks describes a published evidence commit well enough to turn a
 // local artifact path into a stable PR link.
 type evidenceLinks struct {
-	// blobBase and rawBase are the provider URL prefixes for the evidence
-	// COMMIT, not the branch: a later run may overwrite the same paths at the
-	// branch tip, and an old PR must keep showing the bytes it was reviewed
-	// against.
+	// blobBase is the provider URL prefix for the evidence COMMIT, not the
+	// branch: a later run may overwrite the same paths at the branch tip, and
+	// an old PR must keep showing the bytes it was reviewed against.
 	blobBase string
-	rawBase  string
 	// root is the local directory the artifacts were published from.
 	root string
 	// dir is the run's directory inside the evidence branch, "" at root.
@@ -32,8 +30,9 @@ type evidenceLinks struct {
 // orphan evidence branch and returns the links the PR body should use. It
 // returns nil whenever evidence is not opted in, there is nothing to publish,
 // or publication failed. The renderer then omits evidence-branch links that
-// would not resolve; it may still use an uploaded media attachment, otherwise
-// the artifact keeps its local-path rendering.
+// would not resolve, and the artifact keeps its local-path rendering. Image and
+// video files are never published (internal/evidence skips them), so no image
+// or video is ever linked.
 func publishRunEvidence(sctx *pipeline.StepContext) *evidenceLinks {
 	if sctx == nil || sctx.Config == nil || sctx.Repo == nil || sctx.Run == nil || !sctx.Config.Test.Evidence.StoreInRepo {
 		return nil
@@ -93,14 +92,12 @@ func publishRunEvidence(sctx *pipeline.StepContext) *evidenceLinks {
 		links.files[file] = true
 	}
 	links.blobBase = "https://github.com/" + repoPath + "/blob/" + url.PathEscape(result.CommitSHA) + "/"
-	links.rawBase = "https://raw.githubusercontent.com/" + repoPath + "/" + url.PathEscape(result.CommitSHA) + "/"
 	return links
 }
 
 // target returns the PR link for an artifact path published by this run, or ""
-// when the path is not one of them. raw selects the rendering host used for
-// images and videos so they display inline instead of as a page link.
-func (e *evidenceLinks) target(artifactPath string, raw bool) string {
+// when the path is not one of them.
+func (e *evidenceLinks) target(artifactPath string) string {
 	if e == nil || e.blobBase == "" || artifactPath == "" {
 		return ""
 	}
@@ -112,11 +109,7 @@ func (e *evidenceLinks) target(artifactPath string, raw bool) string {
 	if !e.files[slashed] {
 		return ""
 	}
-	base := e.blobBase
-	if raw {
-		base = e.rawBase
-	}
-	return base + joinURLPath(e.dir, slashed)
+	return e.blobBase + joinURLPath(e.dir, slashed)
 }
 
 func joinURLPath(dir, rel string) string {

@@ -77,8 +77,8 @@ type Result struct {
 	Files []string
 }
 
-// Publish copies every regular file under req.SourceDir onto the evidence
-// branch and pushes it.
+// Publish copies every regular file under req.SourceDir except images and
+// videos onto the evidence branch and pushes it.
 //
 // The commit is built with plumbing against a scratch index, so the caller's
 // worktree, index, and HEAD are never touched. The new commit's parent is the
@@ -311,6 +311,10 @@ type collectedFile struct {
 // skipped WHOLE, so its contents are never published and never counted against
 // the size and file-count budgets either - otherwise unpublishable content
 // could still fail the publication and drop real evidence back to local links.
+//
+// Image and video files are skipped the same way, before the budgets: no image
+// or video of the work leaves the machine, so the evidence branch carries no
+// image or video and is not a second way to upload screenshots (IsMedia).
 func collectFiles(root string, exclude []string) ([]collectedFile, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, nil
@@ -336,7 +340,7 @@ func collectFiles(root string, exclude []string) ([]collectedFile, error) {
 			}
 			return nil
 		}
-		if !d.Type().IsRegular() {
+		if !d.Type().IsRegular() || IsMedia("", d.Name()) {
 			return nil
 		}
 		info, err := d.Info()

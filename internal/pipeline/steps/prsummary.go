@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/evidence"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -87,7 +88,6 @@ type testingArtifactRenderState struct {
 type testingSummaryOptions struct {
 	flavor               prBodyFlavor
 	githubBlobBase       string
-	githubRawBase        string
 	includeTestedDetails bool
 	compactArtifacts     bool
 	summaryParagraph     bool
@@ -102,10 +102,6 @@ type testingSummaryOptions struct {
 	// branch. It is nil when nothing was published, and the artifacts then
 	// render as local paths rather than as links that would not resolve.
 	evidence *evidenceLinks
-	// attachments maps a local evidence path to a GitHub user-attachments URL
-	// uploaded at PR render time. Nil means nothing was uploaded; the renderer
-	// then keeps today's local-path or commit-pinned link.
-	attachments map[string]string
 }
 
 // BuildPipelineSummary produces a deterministic markdown section from step results and rounds.
@@ -347,10 +343,10 @@ func BuildTestingSummaryForPR(steps []*db.StepResult, rounds map[string][]*db.St
 }
 
 func BuildTestingSummaryForPRWithProvider(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider) string {
-	return buildPRTestingSummary(steps, rounds, upstreamURL, ref, repoRoot, evidenceRoot, links, provider, nil)
+	return buildPRTestingSummary(steps, rounds, upstreamURL, ref, repoRoot, evidenceRoot, links, provider)
 }
 
-func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider, attachments map[string]string) string {
+func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider) string {
 	opts := testingSummaryOptionsForGitHub(upstreamURL, ref)
 	opts.flavor = prBodyFlavorFor(provider)
 	opts.compactArtifacts = true
@@ -359,7 +355,6 @@ func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepR
 	opts.repoRoot = repoRoot
 	opts.evidenceRoot = evidenceRoot
 	opts.evidence = links
-	opts.attachments = attachments
 	return buildTestingSummary(steps, rounds, opts)
 }
 
@@ -454,8 +449,8 @@ func needsArtifactBlockSeparator(previous, current string) bool {
 	current = strings.TrimSpace(current)
 	previousIsDetails := strings.HasPrefix(previous, "<details>")
 	currentIsDetails := strings.HasPrefix(current, "<details>")
-	previousIsBullet := strings.HasPrefix(previous, "- Evidence:")
-	currentIsBullet := strings.HasPrefix(current, "- Evidence:")
+	previousIsBullet := strings.HasPrefix(previous, "- ")
+	currentIsBullet := strings.HasPrefix(current, "- ")
 	return previousIsDetails && currentIsBullet || previousIsBullet && currentIsDetails
 }
 
@@ -492,7 +487,6 @@ func testingSummaryOptionsForGitHub(upstreamURL, ref string) testingSummaryOptio
 	}
 	return testingSummaryOptions{
 		githubBlobBase:       "https://github.com/" + repoPath + "/blob/" + url.PathEscape(ref) + "/",
-		githubRawBase:        "https://raw.githubusercontent.com/" + repoPath + "/" + url.PathEscape(ref) + "/",
 		includeTestedDetails: false,
 	}
 }
@@ -674,6 +668,9 @@ func renderTestingSummaryFor(summary string, flavor prBodyFlavor) string {
 }
 
 func renderTestingArtifact(artifact types.TestArtifact, opts testingSummaryOptions, state *testingArtifactRenderState) string {
+	if isMediaArtifact(artifact) {
+		return renderMediaArtifact(artifact)
+	}
 	label := sanitizePromptText(artifact.Label)
 	if label == "" {
 		return ""
@@ -683,7 +680,7 @@ func renderTestingArtifact(artifact types.TestArtifact, opts testingSummaryOptio
 	}
 	target := artifact.URL
 	if target == "" {
-		target = artifactTargetForPath(artifact, opts)
+		target = artifactLinkTargetForPath(artifact, opts)
 	}
 	localPath := localArtifactPath(artifact.Path, opts)
 	fileText, hasFile := embeddedArtifactText(artifact, opts, state)
@@ -694,15 +691,7 @@ func renderTestingArtifact(artifact types.TestArtifact, opts testingSummaryOptio
 	}
 
 	var b strings.Builder
-	if target != "" && isImageArtifact(artifact.Kind, target) {
-		b.WriteString(fmt.Sprintf("**%s**\n\n![%s](%s)\n", html.EscapeString(label), markdownAltText(label), target))
-	} else if target != "" && isVideoArtifact(artifact.Kind, target) {
-		if opts.flavor == prBodyMarkdown {
-			b.WriteString(fmt.Sprintf("- Evidence: [%s](%s)\n", html.EscapeString(label), target))
-		} else {
-			b.WriteString(fmt.Sprintf("**%s**\n\n<video src=\"%s\" controls></video>\n", html.EscapeString(label), html.EscapeString(target)))
-		}
-	} else if !hasFile {
+	if !hasFile {
 		if target != "" {
 			b.WriteString(fmt.Sprintf("- Evidence: [%s](%s)\n", html.EscapeString(label), target))
 		} else if localPath != "" {
@@ -733,23 +722,13 @@ func renderCompactTestingArtifact(artifact types.TestArtifact, opts testingSumma
 	localPath := localArtifactPath(artifact.Path, opts)
 	fileText, hasFile := embeddedArtifactText(artifact, opts, state)
 	caption := artifact.Content
-	attachment := opts.attachmentURL(artifact)
 
-	if target == "" && localPath == "" && caption == "" && !hasFile && attachment == "" {
+	if target == "" && localPath == "" && caption == "" && !hasFile {
 		return ""
 	}
 
-	// No embeddable text: render a link, attachment, or local-file reference
-	// (images, videos, binaries).
+	// No embeddable text: render a link or local-file reference (binaries).
 	if caption == "" && !hasFile {
-		if attachment != "" {
-			var b strings.Builder
-			b.WriteString(renderAttachmentMarkdown(artifact, attachment, label))
-			if target != "" {
-				b.WriteString(fmt.Sprintf("- Evidence: [%s](%s)\n", html.EscapeString(label), target))
-			}
-			return b.String()
-		}
 		if target != "" {
 			return fmt.Sprintf("- Evidence: [%s](%s)\n", html.EscapeString(label), target)
 		}
@@ -764,7 +743,7 @@ func renderCompactTestingArtifact(artifact types.TestArtifact, opts testingSumma
 	var inner strings.Builder
 	if target != "" {
 		inner.WriteString(fmt.Sprintf("Source: [%s](%s)\n\n", html.EscapeString(label), target))
-	} else if attachment == "" && !hasFile && localPath != "" {
+	} else if !hasFile && localPath != "" {
 		inner.WriteString(renderLocalArtifactReference("Source", label, localPath, opts.flavor))
 		inner.WriteString("\n")
 	}
@@ -773,42 +752,43 @@ func renderCompactTestingArtifact(artifact types.TestArtifact, opts testingSumma
 		inner.WriteString("\n\n")
 	}
 	inner.WriteString(fmt.Sprintf("```text\n%s\n```\n", escapeMarkdownFence(escapePipelineFoldMarkers(fenceBody))))
-	folded := foldPRBlock("Evidence: "+html.EscapeString(label), inner.String(), opts.flavor)
-	if attachment == "" {
-		return folded
-	}
-	return renderAttachmentMarkdown(artifact, attachment, label) + "\n" + folded
+	return foldPRBlock("Evidence: "+html.EscapeString(label), inner.String(), opts.flavor)
 }
 
-func (opts testingSummaryOptions) attachmentURL(artifact types.TestArtifact) string {
-	if len(opts.attachments) == 0 || artifact.Path == "" {
+// isMediaArtifact reports whether an artifact is an image or a video by its
+// kind, its path, or its URL.
+func isMediaArtifact(artifact types.TestArtifact) bool {
+	return evidence.IsMedia(artifact.Kind, artifact.Path) || evidence.IsMedia(artifact.Kind, artifact.URL)
+}
+
+// renderMediaArtifact renders an image or video artifact as its caption only,
+// in plain words: no image or video of the work leaves the machine, so the PR
+// body carries no embed, URL, path, file name, label or link for it, whatever
+// the artifact's URL or Path says. The label is left out too, because agents
+// routinely name a screenshot by its file. An artifact with no caption is left
+// out of the body.
+func renderMediaArtifact(artifact types.TestArtifact) string {
+	caption := sanitizePromptText(artifact.Content)
+	if caption == "" {
 		return ""
 	}
-	if url := strings.TrimSpace(opts.attachments[artifact.Path]); url != "" {
-		return url
+	noun := "Screenshot"
+	if evidence.IsVideo(artifact.Kind, artifact.Path) || evidence.IsVideo(artifact.Kind, artifact.URL) {
+		noun = "Recording"
 	}
-	return strings.TrimSpace(opts.attachments[filepath.Clean(artifact.Path)])
-}
-
-func renderAttachmentMarkdown(artifact types.TestArtifact, url, label string) string {
-	if isVideoArtifact(artifact.Kind, artifact.Path) || isVideoArtifact(artifact.Kind, url) {
-		return url + "\n"
-	}
-	return fmt.Sprintf("![%s](%s)\n", markdownAltText(label), url)
+	return fmt.Sprintf("- %s: %s\n", noun, html.EscapeString(caption))
 }
 
 // embeddedArtifactText reads a file artifact and returns its text content,
 // truncated from the middle when it exceeds maxEmbeddedArtifactBytes. ok is
-// false when the artifact has no path, points at an image/video, resolves
-// outside the allowed roots, is missing, empty, or is not UTF-8 text.
+// false when the artifact has no path, resolves outside the allowed roots, is
+// missing, empty, or is not UTF-8 text. Image and video artifacts never reach
+// it: they render as their caption.
 func embeddedArtifactText(artifact types.TestArtifact, opts testingSummaryOptions, state *testingArtifactRenderState) (string, bool) {
 	if artifact.Path == "" {
 		return "", false
 	}
 	if state == nil || state.remainingEmbeddedBytes <= 0 {
-		return "", false
-	}
-	if isImageArtifact(artifact.Kind, artifact.Path) || isVideoArtifact(artifact.Kind, artifact.Path) {
 		return "", false
 	}
 	fsPath := artifactFilesystemPath(artifact.Path, opts)
@@ -912,26 +892,8 @@ func trimUTF8Start(data []byte) []byte {
 	return data
 }
 
-func artifactTargetForPath(artifact types.TestArtifact, opts testingSummaryOptions) string {
-	raw := isImageArtifact(artifact.Kind, artifact.Path) || isVideoArtifact(artifact.Kind, artifact.Path)
-	if target := opts.evidence.target(artifact.Path, raw); target != "" {
-		return target
-	}
-	repoPath := repoRelativeArtifactPath(artifact.Path, opts)
-	if repoPath == "" {
-		return ""
-	}
-	if opts.githubBlobBase == "" || opts.githubRawBase == "" {
-		return repoPath
-	}
-	if isImageArtifact(artifact.Kind, repoPath) || isVideoArtifact(artifact.Kind, repoPath) {
-		return opts.githubRawBase + repoPath
-	}
-	return opts.githubBlobBase + repoPath
-}
-
 func artifactLinkTargetForPath(artifact types.TestArtifact, opts testingSummaryOptions) string {
-	if target := opts.evidence.target(artifact.Path, false); target != "" {
+	if target := opts.evidence.target(artifact.Path); target != "" {
 		return target
 	}
 	repoPath := repoRelativeArtifactPath(artifact.Path, opts)
@@ -1080,38 +1042,6 @@ func sanitizeArtifactURL(target string) string {
 	default:
 		return ""
 	}
-}
-
-func markdownAltText(label string) string {
-	label = strings.ReplaceAll(label, "[", "(")
-	label = strings.ReplaceAll(label, "]", ")")
-	return label
-}
-
-func isImageArtifact(kind, target string) bool {
-	if kind == "screenshot" || kind == "gif" || kind == "image" {
-		return true
-	}
-	lower := strings.ToLower(target)
-	for _, suffix := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"} {
-		if strings.HasSuffix(lower, suffix) {
-			return true
-		}
-	}
-	return false
-}
-
-func isVideoArtifact(kind, target string) bool {
-	if kind == "video" || kind == "recording" {
-		return true
-	}
-	lower := strings.ToLower(target)
-	for _, suffix := range []string{".mp4", ".webm", ".mov"} {
-		if strings.HasSuffix(lower, suffix) {
-			return true
-		}
-	}
-	return false
 }
 
 func escapeMarkdownFence(content string) string {

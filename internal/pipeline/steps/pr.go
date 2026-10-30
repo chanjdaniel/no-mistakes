@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/conventional"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/evidence"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safepath"
@@ -18,13 +20,10 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// PRStep creates or updates a pull request via the provider CLI or API.
-type PRStep struct {
-	// mediaUploader uploads image/video evidence at PR render time. Nil uses
-	// the GitHub host's user-attachments client. Tests inject a stub so they
-	// never talk to live GitHub.
-	mediaUploader userAssetUploader
-}
+// PRStep creates or updates a pull request via the provider CLI or API. It
+// writes the PR's title and body and nothing else: it uploads no file and posts
+// no comment.
+type PRStep struct{}
 
 type prContent struct {
 	Title string `json:"title"`
@@ -143,7 +142,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				if err != nil {
 					return nil, err
 				}
-				emptyNarrative = neutralizeAttestationMarkers(draft.Body)
+				emptyNarrative = neutralizePRMedia(neutralizeAttestationMarkers(draft.Body))
 				title = draft.Title
 			} else if sctx.Config != nil && sctx.Config.PR.TitleFormat != "" {
 				title, err = s.draftConfiguredPRTitle(sctx, branch, baseBranch, baseSHA)
@@ -371,11 +370,12 @@ func describePR(pr *scm.PR) string {
 }
 
 // buildPRContent drafts the pull request title and body and then applies the
-// publication redaction boundary. New template bodies and author-preserving
-// updates use composeOwnedPRContent, which calls the same redactPRContent owner
-// before stamping its integrity guard. This covers every source: agent-authored
-// prose, extracted user intent, findings, fix summaries, step errors, artifact
-// paths, artifact captions, and captured output embedded from evidence files.
+// publication boundary: neutralizePRContent, then redactPRContent. New template
+// bodies and author-preserving updates use composeOwnedPRContent, which applies
+// the same two owners to the generated appendix before stamping its integrity
+// guard. This covers every source: agent-authored prose, extracted user intent,
+// findings, fix summaries, step errors, scenario cells, artifact paths,
+// artifact captions, and captured output embedded from evidence files.
 //
 // The scrub deliberately sits here rather than at each of those sources. A
 // per-source scrub is a set of guards that has to be complete to work, and the
@@ -398,13 +398,13 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		if err != nil {
 			return prContent{}, err
 		}
-		return composeOwnedPRContent(prOwnedBody{before: neutralizeAttestationMarkers(content.Body)}, content.Title, appendix, bodyLimit)
+		return composeOwnedPRContent(prOwnedBody{before: neutralizePRMedia(neutralizeAttestationMarkers(content.Body))}, content.Title, appendix, bodyLimit)
 	}
 	content, err := s.draftPRContent(sctx, branch, baseBranch, baseSHA, provider, bodyLimit)
 	if err != nil {
 		return prContent{}, err
 	}
-	return redactPRContent(content), nil
+	return redactPRContent(neutralizePRContent(content)), nil
 }
 
 // redactPRContent removes the operator's home directory from the content about
@@ -415,6 +415,147 @@ func redactPRContent(content prContent) prContent {
 	content.Title = safepath.RedactText(content.Title)
 	content.Body = safepath.RedactText(content.Body)
 	return content
+}
+
+// neutralizePRContent keeps every image and video out of pipeline-generated PR
+// content: no image of the work leaves the machine, and a PR body is public.
+// Ordinary drafts call it on the whole draft; owned composition calls it on the
+// generated appendix and title, never on author-owned live text. Each generated
+// section is also neutralized before assembly (buildPipelineSectionFor's three
+// sections, the agent's or fallback What Changed body, publicPRIntent, and the
+// generated template narrative), so the length caps see the final text and this
+// boundary pass is a backstop for a source nobody has written yet.
+func neutralizePRContent(content prContent) prContent {
+	content.Title = neutralizePRMedia(content.Title)
+	content.Body = neutralizePRMedia(content.Body)
+	return content
+}
+
+var (
+	// prMediaTagPattern matches an HTML element that can show an image or a
+	// video. "<image" is listed because HTML parsers read it as "<img".
+	prMediaTagPattern = regexp.MustCompile(`(?i)<(img|image|picture|source|video|svg|embed|object|iframe)\b`)
+	// prAnchorTagPattern and prHrefPattern find an HTML link and its target.
+	prAnchorTagPattern = regexp.MustCompile(`(?i)<a\b[^>]*>`)
+	prHrefPattern      = regexp.MustCompile(`(?i)\bhref\s*=\s*["']?([^"'\s>]+)`)
+	// prLinkAttributePattern finds an HTML attribute value that loads or links
+	// a resource, relative paths included.
+	prLinkAttributePattern = regexp.MustCompile(`(?i)\b(?:href|src|srcset|poster|data)\s*=\s*["']?([^"'\s>]+)`)
+	// prMarkdownLinkPattern finds a Markdown inline link or image and its
+	// target.
+	prMarkdownLinkPattern = regexp.MustCompile(`\]\(\s*<?([^)\s>]*)`)
+	// prUserAttachmentPattern matches any token naming GitHub's user-attachments
+	// store, with or without a scheme.
+	prUserAttachmentPattern = regexp.MustCompile(`(?i)[^\s<>"'\x60()\[\]]*user-attachments[^\s<>"'\x60()\[\]]*`)
+	// prURLPattern matches an http(s) URL, parentheses included; a trailing
+	// unbalanced ")" or punctuation is trimmed the way forges' autolinkers do.
+	prURLPattern = regexp.MustCompile(`(?i)\bhttps?://[^\s<>"'\x60\[\]]+`)
+)
+
+// neutralizePRMedia rewrites text so no image or video can render or be linked
+// from it, while keeping it readable: image markdown "![" becomes "!\[", a
+// media element "<img" becomes "<\img" (shown as text), a Markdown or HTML link
+// whose target is an image, a video or a user-attachments asset is broken the
+// same way, and such a URL or HTML attribute target is replaced by a short
+// "(image link removed)"-style note. It is idempotent, so neutralizing a
+// section twice changes nothing.
+func neutralizePRMedia(text string) string {
+	if text == "" {
+		return text
+	}
+	text = prAnchorTagPattern.ReplaceAllStringFunc(text, func(tag string) string {
+		for _, match := range prHrefPattern.FindAllStringSubmatch(tag, -1) {
+			if isNeutralizedPRLinkTarget(match[1]) {
+				return "<\\" + tag[1:]
+			}
+		}
+		return tag
+	})
+	text = replaceSubmatchFunc(prMarkdownLinkPattern, text, func(match string, target string) string {
+		if !isNeutralizedPRLinkTarget(target) {
+			return match
+		}
+		return "]\\" + match[1:]
+	})
+	text = replaceSubmatchFunc(prLinkAttributePattern, text, func(match string, target string) string {
+		if !isNeutralizedPRLinkTarget(target) {
+			return match
+		}
+		return strings.TrimSuffix(match, target) + mediaLinkNote(target)
+	})
+	text = prUserAttachmentPattern.ReplaceAllString(text, "(attachment link removed)")
+	text = prURLPattern.ReplaceAllStringFunc(text, func(raw string) string {
+		link, tail := trimURLTail(raw)
+		if !evidence.IsMedia("", link) {
+			return raw
+		}
+		return mediaLinkNote(link) + tail
+	})
+	text = strings.ReplaceAll(text, "![", "!\\[")
+	return prMediaTagPattern.ReplaceAllStringFunc(text, func(tag string) string {
+		return "<\\" + tag[1:]
+	})
+}
+
+func mediaLinkNote(target string) string {
+	switch {
+	case strings.Contains(strings.ToLower(target), "user-attachments"):
+		return "(attachment link removed)"
+	case evidence.IsVideo("", target):
+		return "(video link removed)"
+	default:
+		return "(image link removed)"
+	}
+}
+
+func isNeutralizedPRLinkTarget(target string) bool {
+	return evidence.IsMedia("", target) || strings.Contains(strings.ToLower(target), "user-attachments")
+}
+
+// replaceSubmatchFunc is ReplaceAllStringFunc with the first submatch passed
+// alongside the whole match.
+func replaceSubmatchFunc(pattern *regexp.Regexp, text string, fn func(match, submatch string) string) string {
+	var b strings.Builder
+	last := 0
+	for _, idx := range pattern.FindAllStringSubmatchIndex(text, -1) {
+		b.WriteString(text[last:idx[0]])
+		b.WriteString(fn(text[idx[0]:idx[1]], text[idx[2]:idx[3]]))
+		last = idx[1]
+	}
+	b.WriteString(text[last:])
+	return b.String()
+}
+
+// htmlDelimiterEntities are the escaped quotes and angle brackets
+// html.EscapeString writes. In escaped text a URL ends at one of them, because
+// a forge's autolinker reads the text after entities are decoded.
+var htmlDelimiterEntities = []string{"&#34;", "&#39;", "&quot;", "&apos;", "&lt;", "&gt;", "&#x22;", "&#x27;"}
+
+// trimURLTail splits trailing punctuation, unbalanced closing parentheses and
+// anything from an escaped quote or angle bracket on off a matched URL, so
+// "(see https://x/a.png)." and "src=&#34;https://x/a.png&#34;" both classify
+// "https://x/a.png".
+func trimURLTail(raw string) (string, string) {
+	end := len(raw)
+	lower := strings.ToLower(raw)
+	for _, entity := range htmlDelimiterEntities {
+		if i := strings.Index(lower, entity); i >= 0 && i < end {
+			end = i
+		}
+	}
+	for end > 0 {
+		c := raw[end-1]
+		if strings.IndexByte(".,;:!?*_~'\"", c) >= 0 {
+			end--
+			continue
+		}
+		if c == ')' && strings.Count(raw[:end], "(") < strings.Count(raw[:end], ")") {
+			end--
+			continue
+		}
+		break
+	}
+	return raw[:end], raw[end:]
 }
 
 func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
@@ -472,7 +613,7 @@ Final diff paths and statuses:
 			content.Body = strings.TrimSpace(content.Body)
 			content.Body = unwrapNestedPRBody(content.Body)
 			content.Body = stripGeneratedSections(content.Body)
-			content.Body = neutralizeAttestationMarkers(content.Body)
+			content.Body = neutralizePRMedia(neutralizeAttestationMarkers(content.Body))
 			if content.Title != "" && content.Body != "" {
 				originalTitle := content.Title
 				content.Title, err = renderPRTitle(sctx, content.Title)
@@ -608,8 +749,11 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	if owned && provider == scm.ProviderBitbucket && pipelineMD != "" {
 		pipelineMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, rounds, sctx.Run.HeadSHA, policy) + "\n```"
 	}
-	testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds))
-	return pipelineMD, riskLine, testingMD
+	testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider)
+	// Neutralized here, before the body is assembled and clamped, so the
+	// length caps see the final text; neutralizePRContent at the boundary is
+	// then a no-op backstop for these sections.
+	return neutralizePRMedia(pipelineMD), neutralizePRMedia(riskLine), neutralizePRMedia(testingMD)
 }
 
 // unwrapNestedPRBody detects when the agent returned the body as a
@@ -1501,7 +1645,7 @@ func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingM
 	if diffSummary == "" {
 		body = "## What Changed\n\nFinal diff unavailable; no complete scope summary was generated."
 	}
-	body = neutralizeAttestationMarkers(body)
+	body = neutralizePRMedia(neutralizeAttestationMarkers(body))
 	if bodyLimit > 0 {
 		body = assemblePRBody(sctx, body, riskLine, testingMD, pipelineMD, bodyLimit)
 	} else {

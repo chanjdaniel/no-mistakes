@@ -343,7 +343,6 @@ review:
 test:
   evidence:
     store_in_repo: true
-    attach_media: false
 `
 
 // evidenceBranchConversationScenario asks a question during review (so the run

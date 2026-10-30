@@ -89,7 +89,7 @@ func baseRequest(remote, work, source string) Request {
 func TestPublish_LandsEvidenceOnOrphanBranchAndLeavesCodeBranchesUntouched(t *testing.T) {
 	remote, work := newRepoWithRemote(t)
 	source := writeEvidence(t, t.TempDir(), map[string]string{
-		"checkout.png":     "\x89PNG binary bytes\x00\x01",
+		"checkout.txt":     "checkout page shows the order total\n",
 		"logs/cli-run.txt": "it works\n",
 	})
 	mainBefore := runGit(t, remote, "rev-parse", "refs/heads/main")
@@ -115,7 +115,7 @@ func TestPublish_LandsEvidenceOnOrphanBranchAndLeavesCodeBranchesUntouched(t *te
 	tree := runGit(t, remote, "ls-tree", "-r", "--name-only", tip)
 	for _, want := range []string{
 		MarkerPath,
-		".no-mistakes/evidence/fm/add-login/checkout.png",
+		".no-mistakes/evidence/fm/add-login/checkout.txt",
 		".no-mistakes/evidence/fm/add-login/logs/cli-run.txt",
 	} {
 		if !strings.Contains(tree, want) {
@@ -384,7 +384,7 @@ func TestPublish_ReportsPublishedFilesRelativeToTheSourceDirectory(t *testing.T)
 func TestPublish_ExcludedDirectoryIsNeverCollected(t *testing.T) {
 	remote, work := newRepoWithRemote(t)
 	source := writeEvidence(t, t.TempDir(), map[string]string{
-		"checkout.png":            "\x89PNG binary bytes\x00\x01",
+		"checkout.txt":            "checkout page shows the order total\n",
 		"review/questions.ndjson": `{"id":"q1","question":"is this intended?"}`,
 		"review/answers.ndjson":   `{"id":"q1","answer":"no","answered_by":"captain"}`,
 	})
@@ -399,7 +399,7 @@ func TestPublish_ExcludedDirectoryIsNeverCollected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
-	if got, want := strings.Join(result.Files, ","), "checkout.png"; got != want {
+	if got, want := strings.Join(result.Files, ","), "checkout.txt"; got != want {
 		t.Fatalf("files = %q, want only %q", got, want)
 	}
 	// Nothing from the excluded directory reached the branch, under any name.
@@ -408,6 +408,58 @@ func TestPublish_ExcludedDirectoryIsNeverCollected(t *testing.T) {
 		if strings.Contains(tree, unwanted) {
 			t.Fatalf("published tree contains %q:\n%s", unwanted, tree)
 		}
+	}
+}
+
+// TestPublish_SkipsImageAndVideoFiles keeps the opt-in evidence branch from
+// becoming a second way to upload screenshots: no image or video of the work
+// leaves the machine, so no image or video is published. A media file is
+// skipped before the budgets are counted, so an oversized recording cannot fail
+// the publication of the logs next to it either.
+func TestPublish_SkipsImageAndVideoFiles(t *testing.T) {
+	remote, work := newRepoWithRemote(t)
+	source := writeEvidence(t, t.TempDir(), map[string]string{
+		"checkout.png":      "\x89PNG binary bytes\x00\x01",
+		"shots/mobile.JPG":  "jpeg bytes",
+		"checkout.mp4":      "ftyp",
+		"logs/cli-run.txt":  "it works\n",
+		"command-output.md": "# output\n",
+	})
+	big := filepath.Join(source, "recording.webm")
+	if err := os.WriteFile(big, make([]byte, maxFileBytes+1), 0o644); err != nil {
+		t.Fatalf("write oversized recording: %v", err)
+	}
+
+	result, err := Publish(context.Background(), baseRequest(remote, work, source))
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if got, want := strings.Join(result.Files, ","), "command-output.md,logs/cli-run.txt"; got != want {
+		t.Fatalf("files = %q, want only the non-media evidence %q", got, want)
+	}
+	tree := runGit(t, remote, "ls-tree", "-r", "--name-only", "refs/heads/"+result.Branch)
+	for _, unwanted := range []string{".png", ".JPG", ".mp4", ".webm"} {
+		if strings.Contains(tree, unwanted) {
+			t.Fatalf("published tree contains a %s file:\n%s", unwanted, tree)
+		}
+	}
+}
+
+// Media alone is nothing to publish, and that must be "no publication" rather
+// than an empty commit on the branch.
+func TestPublish_MediaAlonePublishesNothing(t *testing.T) {
+	remote, work := newRepoWithRemote(t)
+	source := writeEvidence(t, t.TempDir(), map[string]string{"checkout.png": "\x89PNG"})
+
+	result, err := Publish(context.Background(), baseRequest(remote, work, source))
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if result != nil {
+		t.Fatalf("a media-only source produced a publication: %+v", result)
+	}
+	if refs := runGit(t, remote, "for-each-ref", "--format=%(refname)"); refs != "refs/heads/main" {
+		t.Fatalf("remote refs changed: %q", refs)
 	}
 }
 

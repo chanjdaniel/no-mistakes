@@ -8,7 +8,8 @@ import (
 // publication is suppressed. It is the single publication gate: every PR-body
 // render path (ordinary drafting, fallback content, and template appendix)
 // goes through it, so caller-side omission and the repository's trusted
-// policy compose here and nowhere else.
+// policy compose here and nowhere else. The text is media-neutralized
+// (neutralizePRMedia) because it is published.
 //
 // The control is tighten-only in both directions:
 //
@@ -34,7 +35,7 @@ func publicPRIntent(sctx *pipeline.StepContext) string {
 	if runOmitsIntent(sctx) {
 		return ""
 	}
-	return cleanedUserIntent(sctx)
+	return neutralizePRMedia(cleanedUserIntent(sctx))
 }
 
 // runOmitsIntent reports whether this run was started with the caller-side,
