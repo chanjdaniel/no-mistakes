@@ -297,6 +297,15 @@ func agentReportClause(err error) string {
 	return "agent reported: " + text
 }
 
+// IsAgentDeadlineError reports whether err is the diagnosis of an invocation
+// its deadline cut short. Such an error also carries the adapter's own error,
+// which may be a structured-output rejection, but a turn the deadline ended is
+// a timeout, never a formatting slip.
+func IsAgentDeadlineError(err error) bool {
+	var invocation *agentInvocationError
+	return errors.As(err, &invocation)
+}
+
 // agentInvocationError carries both the deadline cause (so a step's own
 // sentinel keeps matching) and the adapter's error (so the concrete failure
 // stays matchable, not just quoted in the message).

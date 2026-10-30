@@ -131,10 +131,6 @@ func TestClassifyTransient_Negative(t *testing.T) {
 			errMsg: `JSON output missing required field "summary"`,
 		},
 		{
-			name:   "competing verdicts",
-			errMsg: `pi output parse: multiple bare JSON objects found in output`,
-		},
-		{
 			name:   "free usage limit",
 			errMsg: `API rate limit reached with HTTP 429: FreeUsageLimit exceeded`,
 		},

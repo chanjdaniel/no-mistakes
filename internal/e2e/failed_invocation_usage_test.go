@@ -26,8 +26,10 @@ import (
 //     row stored a fabricated 0.
 //   - a review round killed by its wall-clock budget never reported usage at
 //     all, so its row reads "-" (unknown), never 0.
-//   - a review fix round that failed keeps its usage too, and a failure alone
-//     is never read as a session fallback.
+//   - a review fix turn whose output was rejected keeps its usage too, and a
+//     failed invocation alone is never read as a session fallback. The round
+//     itself goes on: the turn's work commits under the fallback summary and
+//     the rereview runs.
 //
 // The aggregate follows the same rule as every other nullable column: one
 // invocation without usage blanks that purpose's total rather than silently
@@ -181,22 +183,21 @@ func TestFailedInvocationUsageJourney(t *testing.T) {
 		t.Fatalf("review aggregate summed a partially-known set as if it were complete (IN TOK = %s):\n%s", in, agentsAfterKilled)
 	}
 
-	// Round 3: a fix-mode turn, which is never retried, so its single failed
-	// round is the only record of what the fix cost. Failed turns now return a
-	// result, so the session label must still follow what the adapter reported
-	// about the session rather than being inferred from the failure.
-	h.CommitChange("usage-on-failed-review-fix", "fix.txt", "change\n", "exercise a failed review fix round")
+	// Round 3: a fix-mode turn, which is never retried, so its single rejected
+	// invocation is the only record of what the fix cost. A rejected summary no
+	// longer fails the round: the rereview still reports the seeded finding and
+	// the spent budget parks the step. Failed invocations return a result, so
+	// the session label must still follow what the adapter reported about the
+	// session rather than being inferred from the failure.
+	h.CommitChange("usage-on-failed-review-fix", "fix.txt", "change\n", "exercise a rejected review fix turn")
 	h.PushToGate("usage-on-failed-review-fix")
-	fixRun := h.WaitForRun("usage-on-failed-review-fix", 120*time.Second)
-	if fixRun.Status != types.RunFailed {
-		t.Fatalf("review-fix run status = %s, want failed (error=%v)", fixRun.Status, deref(fixRun.Error))
-	}
+	fixRun := waitForStepStatus(t, h, "usage-on-failed-review-fix", types.StepReview, types.StepStatusFixReview, 120*time.Second)
 
 	fixStats, err := h.Run("stats", "--run", fixRun.ID)
 	if err != nil {
 		t.Fatalf("stats --run %s: %v\n%s", fixRun.ID, err, fixStats)
 	}
-	t.Logf("stock `no-mistakes stats --run` surface after a failed review fix round:\n%s", fixStats)
+	t.Logf("stock `no-mistakes stats --run` surface after a rejected review fix turn:\n%s", fixStats)
 
 	fixRows := tokenRows(t, fixStats, "review")
 	var sawFixRound bool
@@ -206,7 +207,7 @@ func TestFailedInvocationUsageJourney(t *testing.T) {
 		}
 		sawFixRound = true
 		if row.rawIn == "0" || row.rawIn == "-" {
-			t.Fatalf("a failed review fix round lost its usage (in=%s):\n%s", row.rawIn, fixStats)
+			t.Fatalf("a rejected review fix turn lost its usage (in=%s):\n%s", row.rawIn, fixStats)
 		}
 		if row.session == "fallback" {
 			t.Fatalf("a failed round with no session evidence was recorded as a session fallback:\n%s", fixStats)

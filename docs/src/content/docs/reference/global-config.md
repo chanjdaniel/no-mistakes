@@ -863,6 +863,7 @@ The template supports literal text and three Go-style placeholders:
 The value must be a valid UTF-8 template that renders to a non-empty, single-line commit subject.
 The template source is limited to 1,024 bytes and 16 placeholders.
 The fix-agent summary and final rendered subject are each limited to 4,096 bytes.
+In the Review, Test, and Lint fix rounds and repository gate repairs, a fix turn whose summary cannot be read (absent, not valid JSON, or rejected by the output schema) still commits its edits under the step's fallback summary, unless its deadline or a cancellation cut the turn short.
 Before rendering, no-mistakes predicts the subject size from the validated literal text and placeholders, then rejects oversized output without allocating the expanded message.
 Template functions, control actions, named templates, unknown placeholders, malformed syntax, control characters, unsafe Unicode format characters, and Unicode line or paragraph separators cause configuration loading to fail.
 The blocked format set includes every Unicode `Bidi_Control` code point plus `U+00AD`, `U+180E`, `U+200B`, `U+2060` through `U+2064`, the deprecated bidi controls `U+206A` through `U+206F`, `U+FEFF`, `U+FFF9` through `U+FFFB`, and Unicode tag characters in `U+E0000` through `U+E007F`.

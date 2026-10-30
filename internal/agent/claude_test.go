@@ -473,6 +473,24 @@ func TestClaudeAgent_FinalizeResult_ErrorSubtypeNotRetryable(t *testing.T) {
 	}
 }
 
+// TestClaudeAgent_FinalizeResult_ExhaustedStructuredOutputRetriesIsNotARejection:
+// Claude Code re-prompts for its --json-schema output within its own limit, so
+// exhausting it is Claude's own retry layer giving up. It is not marked as a
+// rejection, which keeps every step from adding a second retry layer or a
+// fix-turn fallback on top of it.
+func TestClaudeAgent_FinalizeResult_ExhaustedStructuredOutputRetriesIsNotARejection(t *testing.T) {
+	_, err := finalizeClaudeResult(&claudeResult{Subtype: "error_max_structured_output_retries", IsError: true}, json.RawMessage(`{"type":"object"}`), TokenUsage{})
+	if err == nil {
+		t.Fatal("expected an error for exhausted structured output retries")
+	}
+	if IsStructuredOutputRejected(err) {
+		t.Fatalf("error_max_structured_output_retries must not be a structured-output rejection: %v", err)
+	}
+	if want := "claude error: subtype=error_max_structured_output_retries"; err.Error() != want {
+		t.Fatalf("error = %q, want %q", err, want)
+	}
+}
+
 func TestParseClaudeEvents_ResultCapturesRawEvent(t *testing.T) {
 	events := `{"type":"result","subtype":"success","is_error":false,"structured_output":null}` + "\n"
 

@@ -102,6 +102,7 @@ AI code review of your diff. This is probabilistic evidence, not a security or c
   Findings come only from the attempt that validates, and nothing else from a rejected attempt carries over.
   Exhausting the attempts fails the step as a parse failure, so an unreadable review is never treated as a pass.
   The same applies to every post-fix rereview, while the fixer's own turn is not retried.
+  When the fixer's final summary is rejected, its edits are committed under the step's fallback summary and the rereview judges them; a rejection from a fixer turn its deadline or a cancellation cut short, and Claude's `error_max_structured_output_retries`, still fail the step.
   Ordinary agent failures (exit, timeout, cancellation) are not retried here.
 - Appends the [`review.path_instructions`](/no-mistakes/reference/repo-config/#reviewpath_instructions) blocks whose glob matches at least one changed file, in configured order, each labelled with its own `path` and the files it matched so a scoped rule cannot read as a repository-wide instruction; a change that matches nothing, or a repo with none configured, gets the prompt unchanged
 - Selects those blocks against the complete changed-file list rather than the `ignore_patterns`-filtered one, so a pushed-branch ignore entry cannot suppress a trusted rule, and reads them from the trusted default-branch config copy regardless of `allow_repo_commands`
