@@ -31,8 +31,8 @@ type forcePushDecision struct {
 
 // forcePushWouldDiscardError reports that a force-push would discard commits
 // present on the remote branch that the pipeline never incorporated. Refusing
-// is the whole point: it is what keeps a stale-base rebase or an out-of-band
-// push from silently dropping work that already landed upstream.
+// is the whole point: it is what keeps an out-of-band push from being silently
+// dropped by a publication that never saw it.
 type forcePushWouldDiscardError struct {
 	ref       string
 	remoteSHA string
@@ -45,7 +45,7 @@ func (e *forcePushWouldDiscardError) Error() string {
 		sample = sample[:5]
 	}
 	return fmt.Sprintf(
-		"refusing to force-push %s: remote head %s carries %d commit(s) the pipeline never incorporated (e.g. %s); pushing would discard upstream work. Re-fetch and rebase onto the current remote, or push manually if this overwrite is intended.",
+		"refusing to force-push %s: remote head %s carries %d commit(s) the pipeline never incorporated (e.g. %s); pushing would discard upstream work. Fetch the current remote branch, merge it into your branch, and push again, or push manually if this overwrite is intended.",
 		e.ref, shortSHA(e.remoteSHA), len(e.dropped), strings.Join(shortSHAs(sample), ", "),
 	)
 }
@@ -59,10 +59,10 @@ func (e *forcePushWouldDiscardError) Error() string {
 //
 // lastSeenSHA is the remote head the pipeline last observed or produced for this branch:
 //   - push step: the run's recorded pushed head, a prior pipeline run's recorded
-//     pushed head for this branch, or the remote-tracking ref synced by the rebase
-//     step. On a normal push that tracking ref is the exact commit the branch was
-//     rebased against; on a force push or mid-run rebase over prior generations,
-//     provenance records keep it anchored to what the pipeline previously pushed or observed.
+//     pushed head for this branch, or the remote-tracking ref synced by the Rebase
+//     step. On a normal push that tracking ref is the remote head the run started
+//     from; on an operator's force push over prior generations, provenance
+//     records keep it anchored to what the pipeline previously pushed or observed.
 //   - CI step: the run's last-recorded head, i.e. what the pipeline last pushed.
 //
 // When the remote still points there the push is safe (it only fast-forwards or
@@ -129,8 +129,8 @@ func lsRemoteSHA(gitRun gitRunner, remote, ref string) (string, error) {
 // locally for the comparison, without disturbing remote-tracking refs.
 //
 // Using --cherry-pick (patch-id equivalence) rather than a plain ancestry check
-// is what makes this correct across rebases: a clean rebase rewrites commit
-// SHAs but preserves patch-ids, so commits the pipeline genuinely replayed are
+// is what makes this correct across an operator's own rebase: a clean rebase
+// rewrites commit SHAs but preserves patch-ids, so replayed commits are
 // recognized as incorporated, while a commit that only ever existed on the
 // remote is reported as about-to-be-discarded.
 //

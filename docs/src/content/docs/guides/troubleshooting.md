@@ -171,8 +171,15 @@ Fatal step errors are appended to that log, so failures such as rejected pushes 
 This means the live remote branch changed after the pipeline's last observed head and contains commit(s) the validated worktree did not incorporate.
 `no-mistakes` refuses the push instead of overwriting that remote work.
 
-Fetch and inspect the configured push target, then rebase or merge the remote work into your branch before pushing through `no-mistakes` again.
+Fetch and inspect the configured push target, then merge the remote work into your branch before pushing through `no-mistakes` again.
 If the overwrite is intentional, push manually to the actual remote after reviewing the commits that would be discarded.
+
+### Push fails with `does not contain the run's submitted head` or `last pushed head`
+
+This means the head the run was about to publish dropped the commit you pushed to the gate, or a commit the run had already published.
+The pipeline only ever appends to your branch, so such a head is a history something in the run rewrote, and `no-mistakes` refuses it before writing the PR attestation or pushing (see [Publication keeps the run's history](/no-mistakes/concepts/gate-model/#publication-keeps-the-runs-history)).
+Nothing reached the remote.
+Push your branch through `no-mistakes` again to start a new run; if you meant to rewrite the branch yourself, force-push the rewrite to the gate, which starts a run whose submitted head is that rewrite.
 
 ### Push fails with `refusing to allow an OAuth App to create or update workflow ... without workflow scope`
 

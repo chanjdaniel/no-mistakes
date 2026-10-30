@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -155,6 +156,10 @@ func TestResolveForcePushDecision_RefusesUnincorporatedRemoteCommit(t *testing.T
 	}
 	if _, ok := err.(*forcePushWouldDiscardError); !ok {
 		t.Fatalf("expected forcePushWouldDiscardError, got %T: %v", err, err)
+	}
+	// The remedy is the merge-only one: the gate never asks for a rebase.
+	if msg := err.Error(); !strings.Contains(msg, "merge it into your branch") || strings.Contains(strings.ToLower(msg), "rebase") {
+		t.Fatalf("refusal must tell the operator to merge the current remote branch, never to rebase: %q", msg)
 	}
 }
 

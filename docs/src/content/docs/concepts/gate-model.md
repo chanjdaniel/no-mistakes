@@ -130,7 +130,12 @@ The exception was accepted for reviewed rebases and conflict resolutions that
 changed the submitted patch. The pipeline no longer rebases or resolves
 conflicts: a moved base, at Rebase or as a CI merge-conflict repair, enters as a
 merge commit on top of the head it integrates, which reaches the mirror as an
-ordinary descendant. The exception keeps exactly its accepted scope. The
+ordinary descendant.
+Publication now also requires the published head to contain both of the heads
+the exception names (see [Publication keeps the run's history](#publication-keeps-the-runs-history)),
+so a mirror at either one is an ancestor that needs no reconciliation, and the
+exception no longer fires during publication.
+The exception keeps exactly its accepted scope. The
 replacement head must still be review-approved, and the force push to the configured target
 stays leased on the same last pushed head. Ownership is not containment evidence. The
 exception does not extend to another recorded head, an agent-created head, an
@@ -160,6 +165,15 @@ it restores the archived branch when no intervening ref has appeared, so a
 retry can still resolve the branch. AXI reconciles before its ordinary submission
 push and restores an archived ref after a failed submission if no intervening
 ref has appeared. Neither path forces the private mirror.
+
+### Publication keeps the run's history
+
+Every head a run publishes contains the run's submitted head and, once the run has published, its last pushed head (`Run.LastPushedSHA`).
+The pipeline only appends to a branch: fix commits, and merge commits of a moved base.
+A head that lacks either one is a history the pipeline rewrote, such as a rebase, an agent's reset, or a dropped commit.
+The Push step and the CI step's repair publication share one publication path, which refuses such a head before it writes the PR attestation and before any push, whatever Review approved and whatever the force-push lease would allow.
+A missing, malformed, or unreachable submitted head fails closed.
+An operator who rewrites their branch and force-pushes it to the gate starts a new run whose submitted head is that rewrite, so the rewrite still publishes, through the same guarded `--force-with-lease` push as before.
 
 ### Daemon
 

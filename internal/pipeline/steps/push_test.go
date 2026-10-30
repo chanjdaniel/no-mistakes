@@ -572,148 +572,167 @@ func TestPushStep_CommitsLeftoverChangesWhenLegacyHuskyRuntimeIsMissing(t *testi
 	}
 }
 
-// TestPushStep_AllowsForcePushAfterMidRunRebaseOverPriorPushedGeneration (Issue #837)
-// reproduces the exact pipeline sequence:
-// 1. Generation 1 pushed gen1Head to the remote.
-// 2. Upstream main advanced mid-run.
-// 3. The worktree rebased onto the new main, dropping duplicate fix hunks.
-// 4. PushStep must allow force-pushing the new rebased head over the pipeline's own prior push.
-func TestPushStep_AllowsForcePushAfterMidRunRebaseOverPriorPushedGeneration(t *testing.T) {
-	upstream := t.TempDir()
+// priorGenerationFixture builds the #837 sequence up to the point where the
+// branch has to move past a generation already on the remote: gen1Head (the
+// submission plus a pipeline fix) is pushed, then main advances out of band to
+// newBaseSHA, which the worktree has fetched.
+func priorGenerationFixture(t *testing.T) (dir, upstream, baseSHA, submittedHead, gen1Head, newBaseSHA string) {
+	t.Helper()
+	upstream = t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
 
-	dir, baseSHA, submittedHead := setupGitRepo(t)
+	dir, baseSHA, submittedHead = setupGitRepo(t)
 	gitCmd(t, dir, "remote", "add", "origin", upstream)
 	gitCmd(t, dir, "push", "origin", "main")
 
-	// Generation 1: feature branch is pushed to remote.
 	if err := os.WriteFile(filepath.Join(dir, "gen1_fix.txt"), []byte("gen1 fix\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	gitCmd(t, dir, "add", "-A")
 	gitCmd(t, dir, "commit", "-m", "gen1 pipeline fix")
-	gen1Head := gitCmd(t, dir, "rev-parse", "HEAD")
+	gen1Head = gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "push", "origin", "feature")
 
-	// Upstream main advances mid-run.
+	newBaseSHA = advanceUpstreamMain(t, upstream, "main_advance.txt")
+	gitCmd(t, dir, "fetch", "origin", "main")
+	return dir, upstream, baseSHA, submittedHead, gen1Head, newBaseSHA
+}
+
+// advanceUpstreamMain lands one commit on the upstream's main from another
+// clone and returns it.
+func advanceUpstreamMain(t *testing.T, upstream, file string) string {
+	t.Helper()
 	other := t.TempDir()
 	gitCmd(t, other, "clone", upstream, ".")
 	gitCmd(t, other, "config", "user.name", "o")
 	gitCmd(t, other, "config", "user.email", "o@test.com")
 	gitCmd(t, other, "checkout", "main")
-	if err := os.WriteFile(filepath.Join(other, "main_advance.txt"), []byte("advance\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(other, file), []byte("advance\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	gitCmd(t, other, "add", "-A")
 	gitCmd(t, other, "commit", "-m", "main advance")
 	gitCmd(t, other, "push", "origin", "main")
-	newBaseSHA := gitCmd(t, other, "rev-parse", "HEAD")
+	return gitCmd(t, other, "rev-parse", "HEAD")
+}
 
-	// Mid-run rebase onto new main drops duplicate hunks from gen1Head.
-	gitCmd(t, dir, "fetch", "origin", "main")
-	gitCmd(t, dir, "reset", "--hard", newBaseSHA)
-	if err := os.WriteFile(filepath.Join(dir, "rebased_work.txt"), []byte("rebased work\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "rebased work")
-	rebasedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+// TestPushStep_MidRunBaseIntegrationOverPriorPushedGeneration (Issue #837):
+// this run already published gen1Head when main moved. Bringing the moved base
+// in by rebasing drops the published generation and the submission, so the
+// backstop refuses it; bringing it in by merging appends to gen1Head and
+// publishes as a fast-forward.
+func TestPushStep_MidRunBaseIntegrationOverPriorPushedGeneration(t *testing.T) {
+	for _, integration := range []string{"rebase", "merge"} {
+		t.Run(integration, func(t *testing.T) {
+			dir, upstream, baseSHA, submittedHead, gen1Head, newBaseSHA := priorGenerationFixture(t)
 
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, submittedHead, config.Commands{})
-	sctx.Repo.UpstreamURL = upstream
-	sctx.Run.Branch = "refs/heads/feature"
-	sctx.Run.HeadSHA = rebasedHead
-	sctx.Run.BaseSHA = newBaseSHA
-	sctx.Run.LastPushedSHA = &gen1Head
-	setupGateMirror(t, sctx)
-	recordReviewApproval(t, sctx, rebasedHead)
+			if integration == "rebase" {
+				gitCmd(t, dir, "reset", "--hard", newBaseSHA)
+				if err := os.WriteFile(filepath.Join(dir, "rebased_work.txt"), []byte("rebased work\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, dir, "add", "-A")
+				gitCmd(t, dir, "commit", "-m", "rebased work")
+			} else {
+				gitCmd(t, dir, "merge", "--no-ff", "--no-edit", newBaseSHA)
+			}
+			head := gitCmd(t, dir, "rev-parse", "HEAD")
 
-	if _, err := (&PushStep{}).Execute(sctx); err != nil {
-		t.Fatalf("push step failed after mid-run rebase over prior pushed generation: %v", err)
-	}
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, submittedHead, config.Commands{})
+			sctx.Repo.UpstreamURL = upstream
+			sctx.Run.Branch = "refs/heads/feature"
+			sctx.Run.HeadSHA = head
+			if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
+				HeadSHA: gen1Head, TargetKind: "upstream", TargetFingerprint: "fingerprint", Ref: "refs/heads/feature",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			setupGateMirror(t, sctx)
+			recordReviewApproval(t, sctx, head)
 
-	remoteHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature")
-	if remoteHead != rebasedHead {
-		t.Fatalf("expected remote head = %s, got %s", rebasedHead, remoteHead)
+			_, err := (&PushStep{}).Execute(sctx)
+			remoteHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature")
+			if integration == "rebase" {
+				if err == nil || !strings.Contains(err.Error(), "does not contain the run's submitted head") {
+					t.Fatalf("Execute() error = %v, want the submitted-head refusal", err)
+				}
+				if remoteHead != gen1Head {
+					t.Fatalf("remote head = %s, want it left at the published generation %s", remoteHead, gen1Head)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("push step failed after a mid-run merge over the prior pushed generation: %v", err)
+			}
+			if remoteHead != head {
+				t.Fatalf("remote head = %s, want the merge %s", remoteHead, head)
+			}
+			if parent := gitCmd(t, upstream, "rev-parse", head+"^1"); parent != gen1Head {
+				t.Fatalf("merge's first parent = %s, want the published generation %s", parent, gen1Head)
+			}
+		})
 	}
 }
 
-// TestPushStep_AllowsForcePushOnRerunOverPriorRunPushedGeneration (Issue #837)
-// reproduces a `rerun` where Run1 pushed gen1Head, then Run2 (with LastPushedSHA==nil)
-// validates a rebased head. PushStep must look up the branch's prior pushed head
-// from durable DB records and allow the force-push over the prior run's push.
-func TestPushStep_AllowsForcePushOnRerunOverPriorRunPushedGeneration(t *testing.T) {
-	upstream := t.TempDir()
-	gitCmd(t, upstream, "init", "--bare")
+// TestPushStep_PublishesOperatorForcePushOverPriorRunPushedGeneration (Issue
+// #837): a prior run published gen1Head, then the operator rewrote the branch
+// themselves and force-pushed it to the gate, which starts a run whose
+// submitted head is that rewrite. The backstop lets it through, and Push must
+// look up the branch's prior pushed head from durable records so the guarded
+// lease allows the force-push over the prior run's push - for the rewrite
+// itself and for a merge of a further moved base on top of it.
+func TestPushStep_PublishesOperatorForcePushOverPriorRunPushedGeneration(t *testing.T) {
+	for _, variant := range []string{"operator_rewrite", "merged_on_top"} {
+		t.Run(variant, func(t *testing.T) {
+			dir, upstream, baseSHA, _, gen1Head, newBaseSHA := priorGenerationFixture(t)
 
-	dir, baseSHA, submittedHead := setupGitRepo(t)
-	gitCmd(t, dir, "remote", "add", "origin", upstream)
-	gitCmd(t, dir, "push", "origin", "main")
+			// The operator's own rewrite onto the moved main.
+			gitCmd(t, dir, "reset", "--hard", newBaseSHA)
+			if err := os.WriteFile(filepath.Join(dir, "rebased_work.txt"), []byte("rebased work\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", "-A")
+			gitCmd(t, dir, "commit", "-m", "operator rewrite")
+			operatorHead := gitCmd(t, dir, "rev-parse", "HEAD")
 
-	// Prior Run 1: pushed gen1Head to the remote.
-	if err := os.WriteFile(filepath.Join(dir, "gen1_fix.txt"), []byte("gen1 fix\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "gen1 pipeline fix")
-	gen1Head := gitCmd(t, dir, "rev-parse", "HEAD")
-	gitCmd(t, dir, "push", "origin", "feature")
+			head := operatorHead
+			if variant == "merged_on_top" {
+				// main moves again and the Rebase step merges it.
+				newerBase := advanceUpstreamMain(t, upstream, "main_advance_again.txt")
+				gitCmd(t, dir, "fetch", "origin", "main")
+				gitCmd(t, dir, "merge", "--no-ff", "--no-edit", newerBase)
+				head = gitCmd(t, dir, "rev-parse", "HEAD")
+			}
 
-	// Upstream main advances mid-run.
-	other := t.TempDir()
-	gitCmd(t, other, "clone", upstream, ".")
-	gitCmd(t, other, "config", "user.name", "o")
-	gitCmd(t, other, "config", "user.email", "o@test.com")
-	gitCmd(t, other, "checkout", "main")
-	if err := os.WriteFile(filepath.Join(other, "main_advance.txt"), []byte("advance\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, other, "add", "-A")
-	gitCmd(t, other, "commit", "-m", "main advance")
-	gitCmd(t, other, "push", "origin", "main")
-	newBaseSHA := gitCmd(t, other, "rev-parse", "HEAD")
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, operatorHead, config.Commands{})
+			sctx.Repo.UpstreamURL = upstream
+			sctx.Run.Branch = "refs/heads/feature"
+			sctx.Run.HeadSHA = head
+			sctx.Run.BaseSHA = newBaseSHA
+			setupGateMirror(t, sctx)
+			recordReviewApproval(t, sctx, head)
 
-	// Rebase onto new main produces rebasedHead.
-	gitCmd(t, dir, "fetch", "origin", "main")
-	gitCmd(t, dir, "reset", "--hard", newBaseSHA)
-	if err := os.WriteFile(filepath.Join(dir, "rebased_work.txt"), []byte("rebased work\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "rebased work")
-	rebasedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+			// Record that a prior run for this repo/branch pushed gen1Head.
+			priorRun, err := sctx.DB.InsertRun(sctx.Repo.ID, "refs/heads/feature", gen1Head, baseSHA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sctx.DB.UpdateRunPushBinding(priorRun.ID, db.PushBinding{
+				HeadSHA:           gen1Head,
+				TargetKind:        "upstream",
+				TargetFingerprint: "fingerprint",
+				Ref:               "refs/heads/feature",
+			}); err != nil {
+				t.Fatal(err)
+			}
 
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, submittedHead, config.Commands{})
-	sctx.Repo.UpstreamURL = upstream
-	sctx.Run.Branch = "refs/heads/feature"
-	sctx.Run.HeadSHA = rebasedHead
-	sctx.Run.BaseSHA = newBaseSHA
-	// Run2 itself has not pushed yet (LastPushedSHA is nil)
-	sctx.Run.LastPushedSHA = nil
-	setupGateMirror(t, sctx)
-	recordReviewApproval(t, sctx, rebasedHead)
-
-	// Record that a prior run for this repo/branch pushed gen1Head.
-	priorRun, err := sctx.DB.InsertRun(sctx.Repo.ID, "refs/heads/feature", gen1Head, baseSHA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sctx.DB.UpdateRunPushBinding(priorRun.ID, db.PushBinding{
-		HeadSHA:           gen1Head,
-		TargetKind:        "upstream",
-		TargetFingerprint: "fingerprint",
-		Ref:               "refs/heads/feature",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := (&PushStep{}).Execute(sctx); err != nil {
-		t.Fatalf("push step failed on rerun over prior run's pushed generation: %v", err)
-	}
-
-	remoteHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature")
-	if remoteHead != rebasedHead {
-		t.Fatalf("expected remote head = %s, got %s", rebasedHead, remoteHead)
+			if _, err := (&PushStep{}).Execute(sctx); err != nil {
+				t.Fatalf("push step refused the operator's own force-push over the prior run's pushed generation: %v", err)
+			}
+			if remoteHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); remoteHead != head {
+				t.Fatalf("expected remote head = %s, got %s", head, remoteHead)
+			}
+		})
 	}
 }
 
@@ -822,20 +841,19 @@ func TestPushStep_UpdatesGateMirrorRefOnSuccessfulPush(t *testing.T) {
 		t.Fatalf("expected initial gate head = %s, got %s", submittedHead, initialGateHead)
 	}
 
-	// Worktree produces a new non-fast-forward rebased head
-	gitCmd(t, dir, "reset", "--hard", baseSHA)
-	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature code\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "rebased.txt"), []byte("rebased\n"), 0o644); err != nil {
+	// The Rebase step merged a moved base into the submitted head.
+	gitCmd(t, dir, "checkout", "-q", "main")
+	if err := os.WriteFile(filepath.Join(dir, "advanced.txt"), []byte("base advanced\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "non-fast-forward rebased commit")
-	rebasedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "commit", "-m", "base advanced")
+	gitCmd(t, dir, "checkout", "-q", "feature")
+	gitCmd(t, dir, "merge", "--no-ff", "--no-edit", "main")
+	mergedHead := gitCmd(t, dir, "rev-parse", "HEAD")
 
-	sctx.Run.HeadSHA = rebasedHead
-	recordReviewApproval(t, sctx, rebasedHead)
+	sctx.Run.HeadSHA = mergedHead
+	recordReviewApproval(t, sctx, mergedHead)
 
 	if _, err := (&PushStep{}).Execute(sctx); err != nil {
 		t.Fatalf("push step failed: %v", err)
@@ -843,77 +861,14 @@ func TestPushStep_UpdatesGateMirrorRefOnSuccessfulPush(t *testing.T) {
 
 	// Remote head should be updated
 	remoteHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature")
-	if remoteHead != rebasedHead {
-		t.Fatalf("expected remote head = %s, got %s", rebasedHead, remoteHead)
+	if remoteHead != mergedHead {
+		t.Fatalf("expected remote head = %s, got %s", mergedHead, remoteHead)
 	}
 
 	// Gate mirror ref should also be updated
 	gateHead := gitCmd(t, gateDir, "rev-parse", "refs/heads/feature")
-	if gateHead != rebasedHead {
-		t.Fatalf("expected gate mirror ref = %s, got %s", rebasedHead, gateHead)
-	}
-}
-
-func TestPushStep_PublishesRebasedHeadWhosePatchDiffersFromSubmittedHead(t *testing.T) {
-	nmHome := t.TempDir()
-	t.Setenv("NM_HOME", nmHome)
-
-	upstream := t.TempDir()
-	gitCmd(t, upstream, "init", "--bare")
-
-	dir, baseSHA, submittedHead := setupGitRepo(t)
-	gitCmd(t, dir, "remote", "add", "origin", upstream)
-	gitCmd(t, dir, "push", "origin", "main")
-	gitCmd(t, dir, "push", "origin", "feature")
-
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, submittedHead, config.Commands{})
-	sctx.Repo.UpstreamURL = upstream
-	sctx.Run.Branch = "refs/heads/feature"
-
-	p, err := paths.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	gateDir := p.RepoDir(sctx.Repo.ID)
-	sctx.GateDir = gateDir
-	if err := os.MkdirAll(filepath.Dir(gateDir), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, filepath.Dir(gateDir), "init", "--bare", filepath.Base(gateDir))
-	gitCmd(t, gateDir, "fetch", dir, "refs/heads/feature:refs/heads/feature")
-
-	// A rebase whose resolution changes the submitted commit's own patch: the
-	// gate still carries this run's exact submitted head, so publication must
-	// not require the rebased lineage to be patch-identical to it.
-	gitCmd(t, dir, "reset", "--hard", baseSHA)
-	if err := os.WriteFile(filepath.Join(dir, "conflicted.txt"), []byte("upstream neighbour\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "base advanced under the feature")
-	if err := os.WriteFile(filepath.Join(dir, "conflicted.txt"), []byte("upstream neighbour\nresolved feature work\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "rebased with a resolved conflict")
-	rebasedHead := gitCmd(t, dir, "rev-parse", "HEAD")
-
-	sctx.Run.HeadSHA = rebasedHead
-	recordReviewApproval(t, sctx, rebasedHead)
-
-	if _, err := (&PushStep{}).Execute(sctx); err != nil {
-		t.Fatalf("push step refused its own submitted head: %v", err)
-	}
-	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != rebasedHead {
-		t.Fatalf("remote head = %s, want %s", got, rebasedHead)
-	}
-	if got := gitCmd(t, gateDir, "rev-parse", "refs/heads/feature"); got != rebasedHead {
-		t.Fatalf("gate mirror ref = %s, want %s", got, rebasedHead)
-	}
-	// The replaced head stays recoverable.
-	archived := gitCmd(t, gateDir, "rev-parse", "refs/tags/no-mistakes-abandoned/feature/"+submittedHead+"^{commit}")
-	if archived != submittedHead {
-		t.Fatalf("archived submitted head = %s, want %s", archived, submittedHead)
+	if gateHead != mergedHead {
+		t.Fatalf("expected gate mirror ref = %s, got %s", mergedHead, gateHead)
 	}
 }
 
@@ -944,9 +899,10 @@ func TestPushStep_RefusedUpstreamPushLeavesGateMirrorRefIntact(t *testing.T) {
 	}
 	gitCmd(t, filepath.Dir(gateDir), "init", "--bare", filepath.Base(gateDir))
 
-	// A stale private mirror head whose content the rebased head does carry, so
-	// reconciliation is genuinely planned rather than refused.
-	gitCmd(t, dir, "reset", "--hard", baseSHA)
+	// A stale private mirror head on top of the submission whose content the
+	// published head does carry, so reconciliation is genuinely planned rather
+	// than refused.
+	gitCmd(t, dir, "reset", "--hard", submittedHead)
 	if err := os.WriteFile(filepath.Join(dir, "mirrored.txt"), []byte("mirrored work\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -955,19 +911,20 @@ func TestPushStep_RefusedUpstreamPushLeavesGateMirrorRefIntact(t *testing.T) {
 	staleMirrorHead := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, gateDir, "fetch", dir, staleMirrorHead+":refs/heads/feature")
 
-	// The rebased head replays the same content on an advanced base.
-	gitCmd(t, dir, "reset", "--hard", baseSHA)
-	if err := os.WriteFile(filepath.Join(dir, "advanced.txt"), []byte("base advanced\n"), 0o644); err != nil {
+	// The published head keeps the submission and replays the same content
+	// after another pipeline commit.
+	gitCmd(t, dir, "reset", "--hard", submittedHead)
+	if err := os.WriteFile(filepath.Join(dir, "advanced.txt"), []byte("pipeline fix\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "advance base")
+	gitCmd(t, dir, "commit", "-m", "pipeline fix")
 	if err := os.WriteFile(filepath.Join(dir, "mirrored.txt"), []byte("mirrored work\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	gitCmd(t, dir, "add", "-A")
 	gitCmd(t, dir, "commit", "-m", "replay mirrored work")
-	rebasedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	publishedHead := gitCmd(t, dir, "rev-parse", "HEAD")
 
 	// An out-of-band commit reaches the remote, so the push is refused.
 	outOfBand := t.TempDir()
@@ -980,8 +937,8 @@ func TestPushStep_RefusedUpstreamPushLeavesGateMirrorRefIntact(t *testing.T) {
 	gitCmd(t, outOfBand, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-m", "out-of-band commit")
 	gitCmd(t, outOfBand, "push", "origin", "feature")
 
-	sctx.Run.HeadSHA = rebasedHead
-	recordReviewApproval(t, sctx, rebasedHead)
+	sctx.Run.HeadSHA = publishedHead
+	recordReviewApproval(t, sctx, publishedHead)
 
 	outOfBandHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature")
 	if _, err := (&PushStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), outOfBandHead[:12]) {

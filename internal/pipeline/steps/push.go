@@ -17,7 +17,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// PushStep force-pushes the worktree state to the configured push remote.
+// PushStep publishes the run's head to the configured push remote.
 type PushStep struct{}
 
 func (s *PushStep) Name() types.StepName { return types.StepPush }
@@ -136,6 +136,9 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	if err := assertReviewApprovedPushHead(sctx, headBeingPushed); err != nil {
 		return err
 	}
+	if err := assertPushHeadKeepsRunHistory(sctx, headBeingPushed); err != nil {
+		return err
+	}
 	// Prove the private mirror is safe to reconcile BEFORE anything is
 	// published: outside the exact run-owned-head exception, unproven private
 	// content must refuse while the branch is intact. Applying the plan is deferred
@@ -148,8 +151,8 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	}
 
 	// Decide whether force-pushing would discard commits the pipeline never saw.
-	// The lease is anchored to the remote-tracking ref the rebase step freshly
-	// fetched (the exact commit this branch was rebased against) or the run's
+	// The lease is anchored to the remote-tracking ref the Rebase step freshly
+	// fetched (the remote head this run started from) or the run's
 	// own recorded prior push generation, so a push that would clobber an
 	// out-of-band or stale-mirror commit fails loudly instead of silently dropping it.
 	// A bare --force-with-lease offers no protection when pushing to a URL (no
@@ -175,8 +178,8 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 		// force and no lease anchor. That leaves the remote, rather than our own
 		// lease bookkeeping, enforcing the no-rewrite property an open PR's head
 		// and a SHA-bound attestation depend on - which is what keeps that head
-		// from being rewritten when the branch integrated a moved base by
-		// merging rather than rebasing (rebase.strategy).
+		// from being rewritten when the branch integrated a moved base, which
+		// the Rebase and CI steps only ever do by merging.
 		if err := stepGitPushCommit(sctx, pushURL, headBeingPushed, ref, "", false); err != nil {
 			return fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
@@ -237,7 +240,10 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 // head and its exact durable last-published head - are eligible for the policy
 // exception owned by docs/src/content/docs/concepts/gate-model.md. Do not
 // substitute an agent-created or other recorded head: those still require
-// preservation checks.
+// preservation checks. assertPushHeadKeepsRunHistory runs first and requires
+// the published head to contain both of those heads, so a mirror at either one
+// is an ancestor that needs no reconciliation and the exception never fires
+// here; it stays as the gate's own rule rather than this caller's.
 func planGateMirrorReconciliation(ctx context.Context, sctx *pipeline.StepContext, ref, branch, headBeingPushed string) (gatepkg.StaleBranchPlan, error) {
 	var plan gatepkg.StaleBranchPlan
 	if sctx.Repo == nil || strings.TrimSpace(sctx.GateDir) == "" {
@@ -270,9 +276,9 @@ func runOwnedSubmittedHead(sctx *pipeline.StepContext) string {
 
 // runOwnedPublishedHead returns the head this run last published, read from
 // the durable run record. Once a run has published, the mirror carries that
-// head rather than the submitted one, so a reviewed rewrite of an already
-// published run - a CI merge-conflict repair revalidated from Review - needs
-// the same exception to replace it. UpdateRunPublication writes the value only
+// head rather than the submitted one, which is why the mirror exception and
+// the publication backstop (assertPushHeadKeepsRunHistory) both read it.
+// UpdateRunPublication writes the value only
 // after a verified push and mirror settlement, so it is never an external or
 // newer head, and the upstream push is leased on the same SHA
 // (lastKnownBranchTip). The in-memory run is not the source: publication
@@ -375,6 +381,51 @@ func assertReviewApprovedPushHead(sctx *pipeline.StepContext, proposedHead strin
 	return nil
 }
 
+// assertPushHeadKeepsRunHistory is the publication backstop of the merge-only
+// gate: the proposed head must contain the run's submitted head and, once the
+// run has published, its durable last pushed head. The pipeline only ever
+// appends (fix commits, merges of a moved base), so a head that lacks either is
+// a history the pipeline rewrote - a rebase, an agent's reset, a dropped
+// commit - and it is refused before the attestation write and before any push,
+// whatever Review approved and whatever the lease would allow. An operator's
+// own force-push to the gate starts a new run whose submitted head is that
+// rewrite, so it still publishes through resolveForcePushDecision's guarded
+// lease. A missing, malformed, or unresolvable submitted head fails closed.
+func assertPushHeadKeepsRunHistory(sctx *pipeline.StepContext, proposedHead string) error {
+	submitted := runOwnedSubmittedHead(sctx)
+	if submitted == "" {
+		return errors.New("refusing to push: run has no recorded submitted head")
+	}
+	if err := assertPushHeadContains(sctx, proposedHead, submitted, "submitted head"); err != nil {
+		return err
+	}
+	published, err := runOwnedPublishedHead(sctx)
+	if err != nil {
+		return fmt.Errorf("refusing to push: %w", err)
+	}
+	if published == "" {
+		return nil
+	}
+	return assertPushHeadContains(sctx, proposedHead, published, "last pushed head")
+}
+
+func assertPushHeadContains(sctx *pipeline.StepContext, proposedHead, required, label string) error {
+	if !isFullGitObjectID(required) {
+		return fmt.Errorf("refusing to push: the run's %s %q is malformed", label, required)
+	}
+	resolved, err := stepGitRun(sctx, "rev-parse", "--verify", "--quiet", required+"^{commit}")
+	if err != nil || !strings.EqualFold(strings.TrimSpace(resolved), required) {
+		return fmt.Errorf("refusing to push: the run's %s %s is unreachable", label, shortObjectID(required))
+	}
+	if strings.EqualFold(proposedHead, required) {
+		return nil
+	}
+	if _, err := stepGitRun(sctx, "merge-base", "--is-ancestor", required, proposedHead); err != nil {
+		return fmt.Errorf("refusing to push: proposed head %s does not contain the run's %s %s; the gate never publishes a history that drops it (it merges, and never rebases or resets)", shortObjectID(proposedHead), label, shortObjectID(required))
+	}
+	return nil
+}
+
 // reviewApprovedHead returns the run's durable review-approved commit, or ""
 // plus the reason it is unusable. It is the single reader of that authority, so
 // the pre-publication continuity decision and the publication guard itself can
@@ -420,9 +471,9 @@ func shortObjectID(value string) string {
 func lastKnownBranchTip(ctx context.Context, sctx *pipeline.StepContext, branch string, fork bool) string {
 	// Publication updates the durable run row after the remote and mirror settle,
 	// but the executor's in-memory run only advances HeadSHA. Reload the current
-	// run first so a later reviewed rewrite leases against the same LastPushedSHA
-	// that qualified its mirror reconciliation, rather than an older in-memory
-	// generation.
+	// run first so a later publication leases against the same LastPushedSHA
+	// the publication backstop required it to contain, rather than an older
+	// in-memory generation.
 	if sctx.DB != nil && sctx.Run != nil {
 		if run, err := sctx.DB.GetRun(sctx.Run.ID); err == nil {
 			if run != nil && run.LastPushedSHA != nil && strings.TrimSpace(*run.LastPushedSHA) != "" {

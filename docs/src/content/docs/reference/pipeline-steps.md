@@ -233,18 +233,19 @@ Pushes the validated branch to the configured push target.
 - With GitHub fork routing, the push target is `repos.fork_url`
 - Immediately before remote mutation, reloads the durable review-approved commit and refuses to push when that binding is missing, malformed, or unreachable
 - Requires the commit proposed for push to equal or descend from the review-approved commit, allowing commits made by later pipeline steps without authorizing unrelated history
+- Requires the commit proposed for push to contain the run's submitted head and, once the run has published, its last pushed head. A head that lacks either one (a rebase, an agent's reset, a dropped commit) is refused before the attestation write and before any push, and a missing, malformed, or unreachable submitted head fails closed. The CI step's repair publication goes through the same check. See [Publication keeps the run's history](/no-mistakes/concepts/gate-model/#publication-keeps-the-runs-history)
 - Re-reads the push target via `git ls-remote` before pushing
 - Before pushing a non-base branch, refreshes an existing PR attestation using the [pre-push attestation protocol](#pipeline-step-attestation), which owns provider coverage, snapshot selection, and failure behavior.
 - For existing branches, refuses to force-push when the live remote carries commits the pipeline has not incorporated by patch-id
 - Fails closed when the remote safety check cannot verify whether the push would discard existing remote work
-- Uses `--force-with-lease=<ref>:<sha>` with an explicit SHA anchor for allowed existing-branch rewrites
+- Uses `--force-with-lease=<ref>:<sha>` with an explicit SHA anchor for an allowed existing-branch rewrite, which can only be an operator's own rewritten submission
 - Pushes the exact verified commit SHA instead of mutable worktree `HEAD`
 - Treats the branch as already pushed when the remote already points at that verified commit
-- Uses regular push for new branches, and for an append-only update to an existing branch - one whose remote head is already an ancestor of the head being pushed, so nothing can be discarded and the remote itself, rather than a lease anchor, enforces the no-rewrite property an open PR's head depends on. This holds under either [`rebase.strategy`](/no-mistakes/reference/repo-config/#rebasestrategy), since it is a property of the update rather than of how the update was produced
-- When the local gate mirror exists, applies the [private mirror reconciliation contract](/no-mistakes/concepts/gate-model/#private-mirror-reconciliation), including Decision 41-A for the run's exact submitted or last pushed head, while preserving newer descendants through shared worktree refs; skips a missing mirror
+- Uses regular push for new branches, and for an append-only update to an existing branch - one whose remote head is already an ancestor of the head being pushed, so nothing can be discarded and the remote itself, rather than a lease anchor, enforces the no-rewrite property an open PR's head depends on
+- When the local gate mirror exists, applies the [private mirror reconciliation contract](/no-mistakes/concepts/gate-model/#private-mirror-reconciliation), while preserving newer descendants through shared worktree refs; skips a missing mirror
 - Only after the remote and gate mirror settle, atomically records the exact delivered commit as both the run head and successful-push binding; until that database write succeeds, the durable database head and binding remain unchanged, so a partial failure records nothing and is safe to re-enter
 
-A remote branch can move without being rejected when all remote commits are already represented in the validated head, or when a run is intentionally rewriting history it already knew about.
+A remote branch can move without being rejected when all remote commits are already represented in the validated head, or when an operator's own rewritten submission replaces history the run already knew about.
 Any other out-of-band commit stops the push instead of being overwritten.
 Pre-skipping or later skipping Review leaves no approval binding, so Push fails closed unless Push is also skipped.
 
