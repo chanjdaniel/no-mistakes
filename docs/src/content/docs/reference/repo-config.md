@@ -68,7 +68,6 @@ pr:
   # title_format: "{{.Branch}}: {{.Title}}"
 
 auto_fix:
-  rebase: 3
   review: 3
   test: 3
   document: 3

@@ -70,7 +70,6 @@ forge_profiles:
     glab_config_dir: ~/.config/glab-work
 
 auto_fix:
-  rebase: 3
   review: 0
   test: 3
   document: 3
