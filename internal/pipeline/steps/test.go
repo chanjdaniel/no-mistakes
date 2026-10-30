@@ -175,7 +175,7 @@ Previous test findings to address:
 	reassessHistory := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + planSection + testguidance.Rule
 	evidenceGuidance := fmt.Sprintf("- Write new evidence files into this evidence directory, never into the worktree: %s", evidenceDir)
 	if sctx.Config.Test.Evidence.StoreInRepo {
-		evidenceGuidance = fmt.Sprintf("- Write new evidence files into this evidence directory, never into the worktree; they are published to the repository's %s branch automatically and linked from the PR: %s", sctx.Config.Test.Evidence.Branch, evidenceDir)
+		evidenceGuidance = fmt.Sprintf("- Write new evidence files into this evidence directory, never into the worktree; evidence files other than screenshots and recordings are published to the repository's %s branch automatically and linked from the PR: %s", sctx.Config.Test.Evidence.Branch, evidenceDir)
 	}
 	configuredTestCommand := ""
 	if testCmd != "" {
@@ -228,16 +228,18 @@ Evidence:
 - Prefer screenshots, images, videos, GIFs, or rendered HTML artifacts that show the actual end-user surface.
 - DOM snapshots, selector assertions, and text-only render summaries are not substitutes for visual evidence when a rendered surface is available.
 - If a UI-facing change has no screenshot, image, video, GIF, or rendered HTML artifact, state why in testing_summary.
+- Word each scenario's "evidence" as what you observed: the screen or output you saw, the state it was in, and the check that passed (for example, "after paying, the success screen shows the order number"). Name the command or test that showed it when that helps, but never cite a file, screenshot, or tile name as the evidence: a pull request reader cannot open your evidence files.
+- Screenshots and recordings stay on local disk with this run and are never attached to or linked from the pull request; the pull request shows only an image or video artifact's caption, its "content". Caption every screenshot or recording with what it shows, in the same terms as scenario evidence; an image or video artifact with no caption is left out of the pull request.
 %s
 - Do not move, commit, or modify source files only to make evidence linkable. Record local evidence file paths exactly where you created them.
 - Only use command output as an artifact when that output directly demonstrates the end-user experience or requested behavior. Generic pass/fail, coverage, or clean-worktree output is not sufficient evidence.
-- If an existing automated test already drives a scenario end-to-end, run that test as the scenario and cite it as the evidence.
+- If an existing automated test already drives a scenario end-to-end, run that test as the scenario, name it, and say what its run showed.
 - Do NOT run the complete repository test suite. Local Test is targeted validation of the requested intent; remote CI owns broad regression and remains mandatory before a PR is ready.
 %s
 - Include a concise "testing_summary" sentence describing what you exercised and the overall result.
 - The "testing_summary" must account for the complete test step: baseline commands that already ran, scenarios driven, manual or evidence-producing checks, artifacts gathered, and the overall result.
 - Record the exact tests, manual checks, and evidence-producing steps you ran in a "tested" array. Prefer concrete commands or test selectors wrapped in backticks.
-- Always include an "artifacts" array. Leave it empty when you produced no reviewer-visible evidence artifacts. Use artifact path for file artifacts, artifact url for externally visible artifacts, and artifact content for short logs or command output that should be shown directly in the PR.
+- Always include an "artifacts" array. Leave it empty when you produced no reviewer-visible evidence artifacts. Use artifact path for file artifacts, artifact url for externally visible artifacts, and artifact content for short logs or command output that should be shown directly in the PR or, for a screenshot or recording, its caption.
 - If a scenario fails, determine whether the problem is a real product/code failure, a setup/environment problem you can fix, or a flaky/infrastructure issue.
 - If the issue is setup-related and fixable, fix it and re-drive that scenario.
 

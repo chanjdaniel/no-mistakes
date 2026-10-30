@@ -187,7 +187,7 @@ func scenarioContractIssues(i int, scenario testScenarioContractFields) []string
 	}
 	result := *scenario.Result
 	if result != types.ScenarioResultUntested && scenario.Evidence != nil && strings.TrimSpace(*scenario.Evidence) == "" {
-		issues = append(issues, fmt.Sprintf("scenario %d: result %q missing evidence - cite the command, artifact, or evidence file that shows this live result", n, result))
+		issues = append(issues, fmt.Sprintf("scenario %d: result %q missing evidence - say what was observed that shows this live result", n, result))
 	}
 	if scenario.Live != nil && result == types.ScenarioResultUntested && *scenario.Live {
 		issues = append(issues, fmt.Sprintf("scenario %d: result %q but live=true - untested scenarios must set live=false; live=true is only for scenarios you drove against the real product", n, result))
@@ -264,10 +264,10 @@ var testFindingsSchema = json.RawMessage(`{
 				"type": "object",
 				"properties": {
 					"kind": {"type": "string", "description": "artifact type such as screenshot, gif, image, video, log, command-output, or other"},
-					"label": {"type": "string"},
+					"label": {"type": "string", "description": "short name for the artifact; not published for a screenshot, image, or video, whose caption in content is shown instead"},
 					"path": {"type": "string", "description": "artifact file path: repository-relative for a file inside the repository, or the full path to the file in this run's evidence directory for an evidence file. Do not report a path from anywhere else on the machine."},
 					"url": {"type": "string", "description": "artifact URL when available"},
-					"content": {"type": "string", "description": "short log, command output, or textual artifact content to show inline"}
+					"content": {"type": "string", "description": "short log, command output, or textual artifact content to show inline; for a screenshot, image, or video, the caption the pull request shows in its place, saying what it shows: the screen, its state, the check that passed, never its file name. The pull request never embeds or links an image or video; screenshots and videos stay local with the run"}
 				},
 				"required": ["label"]
 			}
@@ -281,7 +281,7 @@ var testFindingsSchema = json.RawMessage(`{
 					"name": {"type": "string", "description": "what an end user does and the observable result that proves it"},
 					"result": {"type": "string", "enum": ["pass", "fail", "untested"]},
 					"live": {"type": "boolean", "description": "true ONLY when this scenario was driven against the real running product in this run; a unit test, stub, recorded fixture, or code reading is not live"},
-					"evidence": {"type": "string", "description": "the command, artifact label, or evidence file that shows this result"},
+					"evidence": {"type": "string", "description": "what was observed that shows this result: the screen or output seen, its state, and the check that passed, optionally naming the command or test that showed it; never a file, screenshot, or tile name as the evidence"},
 					"reason": {"type": "string", "description": "required for untested: what was tried to drive this scenario live and why live validation is impossible, naming the specific tool, credential, permission, or authority out of reach and how to provide it; under no-surface, why there is no live-validatable surface"}
 				},
 				"required": ["name", "result", "live", "evidence", "reason"]

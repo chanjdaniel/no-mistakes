@@ -206,7 +206,7 @@ const passingScenarioFindingsJSON = `{
   "tested": ["npm run e2e -- checkout"],
   "testing_summary": "drove checkout end to end",
   "artifacts": [],
-  "scenarios": [{"name":"user reaches the success screen","result":"pass","live":true,"evidence":"checkout.png","reason":""}],
+  "scenarios": [{"name":"user reaches the success screen","result":"pass","live":true,"evidence":"after paying, the success screen shows the order number","reason":""}],
   "verdict": "go"
 }`
 
@@ -235,7 +235,7 @@ func TestTestStep_VerdictPolicy(t *testing.T) {
 			name: "untested is listed without parking",
 			output: `{"findings":[],"summary":"","tested":["manual check"],"testing_summary":"partly driven","artifacts":[],
 				"scenarios":[
-					{"name":"user reaches the success screen","result":"pass","live":true,"evidence":"checkout.png","reason":""},
+					{"name":"user reaches the success screen","result":"pass","live":true,"evidence":"after paying, the success screen shows the order number","reason":""},
 					{"name":"payment declines are shown","result":"untested","live":false,"evidence":"","reason":"no card sandbox credential on this machine"}
 				],"verdict":"go"}`,
 			wantApproval:      false,
@@ -244,7 +244,7 @@ func TestTestStep_VerdictPolicy(t *testing.T) {
 		{
 			name: "no-go parks",
 			output: `{"findings":[],"summary":"","tested":["npm run e2e -- checkout"],"testing_summary":"checkout broke","artifacts":[],
-				"scenarios":[{"name":"user reaches the success screen","result":"fail","live":true,"evidence":"checkout.png","reason":""}],
+				"scenarios":[{"name":"user reaches the success screen","result":"fail","live":true,"evidence":"paying shows an error banner instead of the success screen","reason":""}],
 				"verdict":"no-go"}`,
 			wantApproval:      true,
 			wantDescription:   "live validation verdict: no-go",
@@ -524,7 +524,7 @@ const mixedLivePassAndUntestedFindingsJSON = `{
   "testing_summary": "partly driven",
   "artifacts": [],
   "scenarios": [
-    {"name":"user reaches the success screen","result":"pass","live":true,"evidence":"checkout.png","reason":""},
+    {"name":"user reaches the success screen","result":"pass","live":true,"evidence":"after paying, the success screen shows the order number","reason":""},
     {"name":"payment declines are shown","result":"untested","live":false,"evidence":"","reason":"no card sandbox credential on this machine"}
   ],
   "verdict": "go"
