@@ -195,6 +195,8 @@ Updates matching documentation for code changes and reports only unresolved gaps
 - Guards `verified` frontmatter dates before it commits, in the document pass, the combined housekeeping pass, and a manual fix round: in a `.md` or `.mdx` file whose leading frontmatter has a top-level `verified: YYYY-MM-DD` key, a date the agent moved or added is restored (or removed when it was absent) unless the agent listed that doc in its `read_against_code` output as read in full against the code, or changed the doc outside that line.
   A date earlier than the one it replaced, or later than the local day the step runs, is restored even then.
   An unreadable structured output lists nothing, so every such date is restored; each restoration is logged with the file and both values, and a file without the key is untouched.
+- Keeps the em dash out of what it writes, in the same passes: in each `.md` or `.mdx` file it changed, every em dash (U+2014) on a line the agent added or changed relative to the step's starting head is rewritten to `-` before the commit (a spaced em dash becomes a spaced `-`), and each rewritten file is logged with its count.
+  Lines the agent did not write are never touched, so existing text, including a quoted rule, keeps its em dash; other file types are never rewritten, and there is no configuration.
 - When `commands.lint` is empty, performs documentation and agent-driven lint in one combined housekeeping invocation, categorizing findings for the document or lint gate; if that pass is skipped, its structured output is unusable, or a daemon restart loses the in-memory result, lint runs its own agent pass instead
 - Includes user intent when available
 - Returns findings only for unresolved documentation gaps or human judgment calls

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,9 @@ import (
 // verifiedDateLayout is the one date shape the guard reads; any other value
 // is not a date it judges.
 const verifiedDateLayout = "2006-01-02"
+
+// emDash is U+2014, which the step never leaves on a Markdown line it wrote.
+const emDash = "\u2014"
 
 // markdownEdit is one Markdown file the document step changed: its content at
 // the step's starting head (absent when the file did not exist there) and in
@@ -45,8 +49,14 @@ func documentPostPass(sctx *pipeline.StepContext, startHead string, output []byt
 	readSet := documentReadSet(output, sctx.WorkDir)
 	today := time.Now().Format(verifiedDateLayout)
 	for _, edit := range edits {
+		written, err := linesWrittenSince(sctx, startHead, edit)
+		if err != nil {
+			return fmt.Errorf("document post-pass: %w", err)
+		}
+		original := edit.after
+		edit.after = rewriteEmDashOnWrittenLines(sctx, edit, written)
 		content := guardVerifiedDate(sctx, edit, readSet, today)
-		if bytes.Equal(content, edit.after) {
+		if bytes.Equal(content, original) {
 			continue
 		}
 		if err := os.WriteFile(filepath.Join(sctx.WorkDir, filepath.FromSlash(edit.path)), content, 0o644); err != nil {
@@ -145,6 +155,97 @@ func repoRelativePath(reported, workDir string) string {
 		return ""
 	}
 	return cleaned
+}
+
+// linesWrittenSince marks each line of the edit's worktree content that the
+// step added or changed relative to startHead: every line of a new file, and
+// otherwise the added lines of git's diff, read from the hunk bodies so a
+// configured inter-hunk context cannot widen them.
+func linesWrittenSince(sctx *pipeline.StepContext, startHead string, edit markdownEdit) ([]bool, error) {
+	written := make([]bool, len(splitLinesKeepEnds(string(edit.after))))
+	if edit.absent {
+		for i := range written {
+			written[i] = true
+		}
+		return written, nil
+	}
+	diff, err := git.RunRaw(sctx.Ctx, sctx.WorkDir, "--literal-pathspecs", "diff", "--no-color", "--no-ext-diff",
+		"--no-textconv", "--text", "--no-renames", "--unified=0", "--inter-hunk-context=0", startHead, "--", edit.path)
+	if err != nil {
+		return nil, fmt.Errorf("diff %s against %s: %w", edit.path, startHead, err)
+	}
+	next, inHunk := 0, false
+	for _, line := range strings.Split(string(diff), "\n") {
+		if strings.HasPrefix(line, "@@ ") {
+			start, ok := hunkNewStart(line)
+			if !ok {
+				return nil, fmt.Errorf("diff %s against %s: unreadable hunk header %q", edit.path, startHead, line)
+			}
+			next, inHunk = start, true
+			continue
+		}
+		if !inHunk || line == "" {
+			continue
+		}
+		switch line[0] {
+		case '+':
+			if next >= 1 && next <= len(written) {
+				written[next-1] = true
+			}
+			next++
+		case ' ':
+			next++
+		}
+	}
+	return written, nil
+}
+
+// hunkNewStart reads the first new-side line number of a unified diff hunk
+// header ("@@ -a,b +c,d @@").
+func hunkNewStart(header string) (int, bool) {
+	fields := strings.Fields(header)
+	if len(fields) < 3 || !strings.HasPrefix(fields[2], "+") {
+		return 0, false
+	}
+	start, _, _ := strings.Cut(fields[2][1:], ",")
+	n, err := strconv.Atoi(start)
+	if err != nil {
+		return 0, false
+	}
+	// A hunk that adds nothing names the line before it; it has no '+' or
+	// context lines, so its start is never used.
+	return n, true
+}
+
+// rewriteEmDashOnWrittenLines returns the edit's content with every em dash
+// on a line the step wrote replaced by a plain dash; lines it did not write,
+// such as a quoted rule, are left as they were.
+func rewriteEmDashOnWrittenLines(sctx *pipeline.StepContext, edit markdownEdit, written []bool) []byte {
+	lines := splitLinesKeepEnds(string(edit.after))
+	total := 0
+	for i, line := range lines {
+		if i >= len(written) || !written[i] {
+			continue
+		}
+		rewritten, n := rewriteEmDash(line)
+		lines[i] = rewritten
+		total += n
+	}
+	if total == 0 {
+		return edit.after
+	}
+	sctx.Log(fmt.Sprintf("rewrote %d em dash(es) in %s", total, edit.path))
+	return []byte(strings.Join(lines, ""))
+}
+
+// rewriteEmDash replaces each em dash in line with "-" and counts them. That
+// one replacement turns " — " into " - " and any other em dash into "-".
+func rewriteEmDash(line string) (string, int) {
+	n := strings.Count(line, emDash)
+	if n == 0 {
+		return line, 0
+	}
+	return strings.ReplaceAll(line, emDash, "-"), n
 }
 
 // guardVerifiedDate returns the edit's content with its frontmatter
