@@ -31,20 +31,14 @@ import (
 // parents, is restored the same way and returned as an error. A target the
 // head already contains is a no-op.
 //
-// Tracked files must be unmodified: a conflict restore resets them, so
-// uncommitted changes in them would be lost. They never belong there, so their presence is
-// an error rather than something to stash around.
+// Tracked files must be unmodified (requireCleanTrackedTree).
 func mergeIntoWorktree(sctx *pipeline.StepContext, run gitRunner, targetSHA, label string) ([]string, error) {
 	preMerge, err := run("rev-parse", "HEAD")
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before merging %s: %w", label, err)
 	}
-	dirty, err := run("status", "--porcelain", "--untracked-files=no")
-	if err != nil {
-		return nil, fmt.Errorf("read worktree status before merging %s: %w", label, err)
-	}
-	if dirty != "" {
-		return nil, fmt.Errorf("refusing to merge %s: the run worktree has uncommitted changes:\n%s", label, dirty)
+	if err := requireCleanTrackedTree(run, "merge", label); err != nil {
+		return nil, err
 	}
 	if _, err := run("merge-base", "--is-ancestor", targetSHA, preMerge); err == nil {
 		return nil, nil
@@ -76,6 +70,56 @@ func mergeIntoWorktree(sctx *pipeline.StepContext, run gitRunner, targetSHA, lab
 		return nil, cause
 	}
 	return nil, nil
+}
+
+// fastForwardWorktree moves the run worktree's HEAD forward to targetSHA, which
+// must descend from it. It is the one other way the pipeline moves a head to
+// another line of history, and it shares mergeIntoWorktree's guarantees: no
+// commit already on the branch is dropped (the old head stays an ancestor),
+// tracked files must be unmodified, and the result is verified, restoring the
+// old head when it is not exactly targetSHA. `merge --ff-only` rather than a
+// reset, so git itself refuses anything that is not a fast-forward.
+func fastForwardWorktree(sctx *pipeline.StepContext, run gitRunner, targetSHA, label string) error {
+	head, err := run("rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("resolve head before fast-forwarding to %s: %w", label, err)
+	}
+	if err := requireCleanTrackedTree(run, "fast-forward to", label); err != nil {
+		return err
+	}
+	if _, err := run("merge-base", "--is-ancestor", head, targetSHA); err != nil {
+		return fmt.Errorf("refusing to fast-forward to %s: it does not contain the run worktree's head %s", label, head)
+	}
+	sctx.Log(fmt.Sprintf("fast-forwarding to %s", label))
+	if _, err := run("merge", "--ff-only", targetSHA); err != nil {
+		if restoreErr := restoreWorktreeHead(sctx, run, head); restoreErr != nil {
+			return fmt.Errorf("fast-forward to %s: %v; %w", label, err, restoreErr)
+		}
+		return fmt.Errorf("fast-forward to %s: %w", label, err)
+	}
+	if got, err := run("rev-parse", "HEAD"); err != nil || got != targetSHA {
+		cause := fmt.Errorf("fast-forward to %s left HEAD at %q instead of %s", label, got, targetSHA)
+		if restoreErr := restoreWorktreeHead(sctx, run, head); restoreErr != nil {
+			return fmt.Errorf("%v; %w", cause, restoreErr)
+		}
+		return cause
+	}
+	return nil
+}
+
+// requireCleanTrackedTree refuses to move the head while tracked files carry
+// uncommitted changes: a restore resets them, so they would be lost. They
+// never belong in the run worktree, so their presence is an error rather than
+// something to stash around.
+func requireCleanTrackedTree(run gitRunner, verb, label string) error {
+	dirty, err := run("status", "--porcelain", "--untracked-files=no")
+	if err != nil {
+		return fmt.Errorf("read worktree status before the %s %s: %w", verb, label, err)
+	}
+	if dirty != "" {
+		return fmt.Errorf("refusing to %s %s: the run worktree has uncommitted changes:\n%s", verb, label, dirty)
+	}
+	return nil
 }
 
 // mergeConflictFinding is the finding a step parks on for one file a merge of

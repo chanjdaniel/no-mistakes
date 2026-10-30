@@ -100,10 +100,10 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		}, nil
 	}
 
-	targets := rebaseTargetsForBranch(branch, defaultBranch, branchTarget)
+	targets := integrationTargets(branch, defaultBranch, branchTarget)
 	if forcePush {
 		sctx.Log("force push detected, skipping " + branchTarget + " sync")
-		targets = forcePushRebaseTargets(branch, defaultBranch)
+		targets = forcePushIntegrationTargets(branch, defaultBranch)
 	}
 
 	startHead, err := git.HeadSHA(ctx, sctx.WorkDir)
@@ -148,7 +148,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 			return nil, err
 		}
 		summary := fmt.Sprintf("conflict merging %s", strings.Join(conflictTargets, ", "))
-		findingsJSON, _ := json.Marshal(Findings{Items: dedupeRebaseFindings(conflictFindings), Summary: summary})
+		findingsJSON, _ := json.Marshal(Findings{Items: dedupeConflictFindings(conflictFindings), Summary: summary})
 		outcome := &pipeline.StepOutcome{
 			NeedsApproval: true,
 			AutoFixable:   false,
@@ -174,9 +174,9 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	return outcome, err
 }
 
-// rebaseTargetsForBranch returns the ordered list of refs to integrate: the
+// integrationTargets returns the ordered list of refs to integrate: the
 // pushed-branch target, then the PR base.
-func rebaseTargetsForBranch(branch, defaultBranch, branchTarget string) []string {
+func integrationTargets(branch, defaultBranch, branchTarget string) []string {
 	var targets []string
 	if branch != "" && branch != defaultBranch {
 		targets = append(targets, branchTarget)
@@ -187,10 +187,10 @@ func rebaseTargetsForBranch(branch, defaultBranch, branchTarget string) []string
 	return targets
 }
 
-// forcePushRebaseTargets returns the targets to integrate after a force push. The pushed
+// forcePushIntegrationTargets returns the targets to integrate after a force push. The pushed
 // branch target is skipped because it may contain autofix commits from prior
 // pipeline runs that the force push intended to discard.
-func forcePushRebaseTargets(branch, defaultBranch string) []string {
+func forcePushIntegrationTargets(branch, defaultBranch string) []string {
 	if branch == defaultBranch {
 		return nil
 	}
@@ -398,20 +398,35 @@ func isRemoteBranchRewritten(ctx context.Context, workDir, remoteRef string) boo
 }
 
 // mergeTarget brings one target into the branch: nothing when it is missing
-// or already contained, a fast-forward when the branch is strictly behind it
-// (shouldSkipRebase), and otherwise a merge of its tip SHA, resolved here so
-// the commit merged is the one the step observed. It returns the conflicted
-// files of a merge that stopped on conflicts, with the worktree restored.
+// or already contained, a fast-forward (fastForwardWorktree) when the branch
+// is strictly behind it, and otherwise a merge (mergeIntoWorktree). Its tip is
+// resolved to a SHA once, here, so the commit integrated is the one the step
+// observed. It returns the conflicted files of a merge that stopped on
+// conflicts, with the worktree restored.
 func mergeTarget(sctx *pipeline.StepContext, run gitRunner, target string) ([]string, error) {
-	skip, err := shouldSkipRebase(sctx.Ctx, sctx, target)
-	if err != nil || skip {
-		return nil, err
+	if _, err := run("rev-parse", "--verify", target); err != nil {
+		return nil, nil
 	}
 	targetSHA, err := run("rev-parse", "--verify", target+"^{commit}")
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s: %w", target, err)
 	}
-	return mergeIntoWorktree(sctx, run, targetSHA, mergeTargetLabel(target))
+	head, err := run("rev-parse", "HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("get local head: %w", err)
+	}
+	label := mergeTargetLabel(target)
+	switch {
+	case head == targetSHA:
+		sctx.Log(fmt.Sprintf("already up-to-date with %s", target))
+		return nil, nil
+	case isAncestor(sctx.Ctx, sctx.WorkDir, targetSHA, head):
+		sctx.Log(fmt.Sprintf("already ahead of %s", target))
+		return nil, nil
+	case isAncestor(sctx.Ctx, sctx.WorkDir, head, targetSHA):
+		return nil, fastForwardWorktree(sctx, run, targetSHA, label)
+	}
+	return mergeIntoWorktree(sctx, run, targetSHA, label)
 }
 
 // mergeTargetLabel names a target the way the operator knows it. The push
@@ -422,39 +437,6 @@ func mergeTargetLabel(target string) string {
 		return branch + " from the push remote"
 	}
 	return target
-}
-
-// shouldSkipRebase checks whether merging targetRef can be skipped.
-// Returns true if targetRef doesn't exist, is already merged, or can be
-// fast-forwarded, which it does here.
-func shouldSkipRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string) (bool, error) {
-	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", targetRef); err != nil {
-		return true, nil
-	}
-	localSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
-	if err != nil {
-		return false, fmt.Errorf("get local head: %w", err)
-	}
-	targetSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", targetRef)
-	if err != nil {
-		return false, fmt.Errorf("get target head %s: %w", targetRef, err)
-	}
-	if localSHA == targetSHA {
-		sctx.Log(fmt.Sprintf("already up-to-date with %s", targetRef))
-		return true, nil
-	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", targetRef, "HEAD"); err == nil {
-		sctx.Log(fmt.Sprintf("already ahead of %s", targetRef))
-		return true, nil
-	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", "HEAD", targetRef); err == nil {
-		sctx.Log(fmt.Sprintf("fast-forwarding to %s", targetRef))
-		if _, err := git.Run(ctx, sctx.WorkDir, "reset", "--hard", targetRef); err != nil {
-			return false, fmt.Errorf("fast-forward to %s: %w", targetRef, err)
-		}
-		return true, nil
-	}
-	return false, nil
 }
 
 // rebaseInProgress returns true if a git rebase is currently in progress.
@@ -487,7 +469,7 @@ func gitPathExists(ctx context.Context, workDir string, names ...string) bool {
 	return false
 }
 
-func dedupeRebaseFindings(findings []Finding) []Finding {
+func dedupeConflictFindings(findings []Finding) []Finding {
 	if len(findings) < 2 {
 		return findings
 	}

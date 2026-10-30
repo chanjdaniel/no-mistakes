@@ -17,8 +17,14 @@ import (
 // operator's own local commit (their hand merge of a moved base, say) only in
 // the worktree, so no ref-free comparison of the two is possible in either
 // repository alone; borrowing the worktree's object store answers it without
-// fetching, pushing, or writing a ref in either repository. ok is false when
-// the gate or the worktree's object directory is unavailable.
+// fetching, pushing, or writing a ref in either repository. It is not free of
+// writes, though: the proofs run `git merge-tree --write-tree`, which writes
+// the merged trees into the gate's object store as unreferenced loose objects
+// (and may point at blobs that live only in the worktree's store), so even a
+// read-only `axi status` can leave them there. Nothing ever references them
+// and gc prunes them, as it does the ones mirror reconciliation's own
+// merge-tree leaves. ok is false when the gate or the worktree's object
+// directory is unavailable.
 func (s *Service) gateWithLocalObjects(ctx context.Context) (gateCtx context.Context, gateDir string, ok bool) {
 	gateDir = strings.TrimSpace(s.GateDir)
 	if gateDir == "" {

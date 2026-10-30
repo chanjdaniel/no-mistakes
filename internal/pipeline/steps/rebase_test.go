@@ -200,6 +200,55 @@ func TestRebaseStep_ForkSyncsPushBranchBeforeDefaultBranch(t *testing.T) {
 	}
 }
 
+// A branch strictly behind its base is fast-forwarded, and that move must
+// refuse a dirty worktree too: a reset to the base would silently drop the
+// uncommitted change to a file the base also changed.
+func TestRebaseStep_DirtyWorktreeRefusesTheFastForward(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "config", "merge.autoStash", "false")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("base\n"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "base commit")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	// main moves on a.txt; feature stays on the base, so it is strictly behind.
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("main\n"), 0o644)
+	gitCmd(t, dir, "commit", "-am", "main advance")
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "checkout", "-b", "feature", baseSHA)
+
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("dirty\n"), 0o644)
+
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, baseSHA, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = upstream
+
+	_, err := (&RebaseStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
+		t.Fatalf("Execute error = %v, want it to refuse the dirty worktree", err)
+	}
+	if len(ag.calls) != 0 {
+		t.Errorf("expected 0 agent calls, got %d", len(ag.calls))
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != baseSHA {
+		t.Fatalf("head = %s, want %s untouched", got, baseSHA)
+	}
+	if content, err := os.ReadFile(filepath.Join(dir, "a.txt")); err != nil || string(content) != "dirty\n" {
+		t.Fatalf("dirty a.txt = %q (err %v), want the uncommitted change kept", content, err)
+	}
+}
+
 func TestRebaseStep_DirtyWorktreeFailsWithoutTouchingIt(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()

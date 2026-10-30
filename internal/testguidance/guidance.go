@@ -42,14 +42,9 @@ directly within the accepted change's scope, but do not turn an ordinary change
 into an unrelated repository-wide cleanup.
 `
 
-// LateRepairPrompt prepends Rule only to centrally classified late-repair
-// phases that may need to change tests. The caller supplies the phase's own
-// prompt so repair roles retain their focused task instructions.
-func LateRepairPrompt(phase, prompt string) string {
-	switch phase {
-	case "ci":
-		return Rule + "\n" + prompt
-	default:
-		return prompt
-	}
+// LateRepairPrompt prepends Rule to a late repair that may need to change
+// tests - the CI repair, the only one left. The caller supplies its own prompt
+// so the repair keeps its focused task instructions.
+func LateRepairPrompt(prompt string) string {
+	return Rule + "\n" + prompt
 }

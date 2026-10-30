@@ -29,7 +29,7 @@ import (
 // CITimeout is interpreted by the CI step as the maximum time to babysit an
 // open PR with no base-branch movement before giving up. The monitor re-arms
 // this timer every time the base branch advances (see internal/pipeline/steps
-// ci.go), so an actively-rebased PR keeps its monitor. The value is
+// ci.go), so a PR whose base keeps moving keeps its monitor. The value is
 // deliberately long because a green PR can legitimately wait days on a
 // dependency PR or on review; a torn-down or abandoned run is reaped
 // explicitly via `no-mistakes axi abort --run <id>` rather than by a short
@@ -1224,7 +1224,7 @@ log_level: info
 # Maximum follow-up auto-fix attempts per step (0 = disabled after the initial pass)
 # Document fixes are attempted during the initial document pass.
 auto_fix:
-  rebase: 3
+  rebase: 3 # accepted and has no effect: every Rebase finding is ask-user
   lint: 3
   test: 3
   review: 0
@@ -1246,8 +1246,9 @@ ci:
   # be proven. Defaults to false: a repair that descends from the reviewed head
   # is published through the same guarded push path the Push step uses and
   # CI keeps monitoring, so one repair costs one agent round. A repair that
-  # cannot show that ancestry revalidates from Review anyway - a merge-conflict
-  # repair always does, because rebasing rewrites the head. Set true to restart
+  # cannot show that ancestry revalidates from Review anyway. A merge-conflict
+  # repair merges the PR's base onto the reviewed head, so it descends from it
+  # and publishes the same way. Set true to restart
   # validation at Review for every repair - safer, and it pays for another full
   # pipeline pass in wall clock and tokens every time CI is repaired. A
   # repository that sets ci.revalidate_repairs on its own default branch

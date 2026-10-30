@@ -271,8 +271,8 @@ func (h *Harness) initGitRepos() {
 	mustGit(h.WorkDir, "config", "user.name", "E2E Test")
 	mustGit(h.WorkDir, "config", "commit.gpgsign", "false")
 
-	// One initial commit so the branch exists and the gate can rebase
-	// against a real base.
+	// One initial commit so the branch exists and the gate can merge
+	// a real base.
 	readme := filepath.Join(h.WorkDir, "README.md")
 	if err := os.WriteFile(readme, []byte("# e2e\n"), 0o644); err != nil {
 		h.t.Fatalf("write readme: %v", err)
