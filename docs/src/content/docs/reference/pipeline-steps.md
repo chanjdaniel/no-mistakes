@@ -198,7 +198,7 @@ Updates matching documentation for code changes and reports only unresolved gaps
   A date earlier than the one it replaced, or later than the local day the step runs, is restored even then.
   An unreadable structured output lists nothing, so every such date is restored; each restoration is logged with the file and both values, and a file without the key is untouched.
 - Keeps the em dash out of what it writes, in the same passes: in each `.md` or `.mdx` file it changed, every em dash (U+2014) on a line the agent added or changed relative to the step's starting head is rewritten to `-` before the commit (a spaced em dash becomes a spaced `-`), and each rewritten file is logged with its count.
-  Lines the agent did not write are never touched, so existing text, including a quoted rule, keeps its em dash; other file types are never rewritten, and there is no configuration.
+  Lines the agent did not write are never touched, so existing text, including a quoted rule, keeps its em dash; neither is an em dash in a fenced code block or an inline code span, where the character is the content; other file types are never rewritten, and there is no configuration.
 - When `commands.lint` is empty, performs documentation and agent-driven lint in one combined housekeeping invocation, categorizing findings for the document or lint gate; if that pass is skipped, its structured output is unusable, or a daemon restart loses the in-memory result, lint runs its own agent pass instead
 - Includes user intent when available
 - Returns findings only for unresolved documentation gaps or human judgment calls

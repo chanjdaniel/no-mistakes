@@ -219,15 +219,20 @@ func hunkNewStart(header string) (int, bool) {
 
 // rewriteEmDashOnWrittenLines returns the edit's content with every em dash
 // on a line the step wrote replaced by a plain dash; lines it did not write,
-// such as a quoted rule, are left as they were.
+// such as a quoted rule, are left as they were, and so is an em dash in a
+// fenced code block or an inline code span, whose meaning is the character.
 func rewriteEmDashOnWrittenLines(sctx *pipeline.StepContext, edit markdownEdit, written []bool) []byte {
-	lines := splitLinesKeepEnds(string(edit.after))
-	total := 0
+	content := string(edit.after)
+	code := markdownCode(content)
+	lines := splitLinesKeepEnds(content)
+	total, offset := 0, 0
 	for i, line := range lines {
+		start := offset
+		offset += len(line)
 		if i >= len(written) || !written[i] {
 			continue
 		}
-		rewritten, n := rewriteEmDash(line)
+		rewritten, n := rewriteEmDash(line, code[start:offset])
 		lines[i] = rewritten
 		total += n
 	}
@@ -238,14 +243,158 @@ func rewriteEmDashOnWrittenLines(sctx *pipeline.StepContext, edit markdownEdit, 
 	return []byte(strings.Join(lines, ""))
 }
 
-// rewriteEmDash replaces each em dash in line with "-" and counts them. That
-// one replacement turns " — " into " - " and any other em dash into "-".
-func rewriteEmDash(line string) (string, int) {
-	n := strings.Count(line, emDash)
+// rewriteEmDash replaces each em dash in line that code does not mark with
+// "-" and counts them. That one replacement turns " — " into " - " and any
+// other em dash into "-". code holds one entry per byte of line.
+func rewriteEmDash(line string, code []bool) (string, int) {
+	var b strings.Builder
+	n := 0
+	for i := 0; i < len(line); {
+		if strings.HasPrefix(line[i:], emDash) && !code[i] {
+			b.WriteByte('-')
+			i += len(emDash)
+			n++
+			continue
+		}
+		b.WriteByte(line[i])
+		i++
+	}
 	if n == 0 {
 		return line, 0
 	}
-	return strings.ReplaceAll(line, emDash, "-"), n
+	return b.String(), n
+}
+
+// markdownCode marks the bytes of content that are Markdown code: every line
+// of a fenced code block, its fences included (an unclosed fence runs to the
+// end), and every inline code span, matched across the lines of a paragraph
+// the way CommonMark matches them. Fences are found after any indentation,
+// blockquote markers or list marker, so a fence nested in a list or a quote
+// is still code.
+func markdownCode(content string) []bool {
+	code := make([]bool, len(content))
+	fence := ""     // the open fence's marker run, "" outside a fence
+	paragraph := -1 // byte offset of the open paragraph's first line
+	closeParagraph := func(end int) {
+		if paragraph >= 0 {
+			markCodeSpans(content[paragraph:end], code[paragraph:end])
+			paragraph = -1
+		}
+	}
+	offset := 0
+	for _, line := range splitLinesKeepEnds(content) {
+		start := offset
+		offset += len(line)
+		body := fenceCandidate(line)
+		switch {
+		case fence != "":
+			markBytes(code[start:offset])
+			if closesFence(body, fence) {
+				fence = ""
+			}
+		case openingFence(body) != "":
+			closeParagraph(start)
+			fence = openingFence(body)
+			markBytes(code[start:offset])
+		case strings.TrimSpace(line) == "":
+			closeParagraph(start)
+		case paragraph < 0:
+			paragraph = start
+		}
+	}
+	closeParagraph(len(content))
+	return code
+}
+
+func markBytes(code []bool) {
+	for i := range code {
+		code[i] = true
+	}
+}
+
+// fenceCandidate strips what may precede a fence on its line: indentation,
+// blockquote markers, and one list marker.
+func fenceCandidate(line string) string {
+	body := strings.TrimLeft(line, " \t>")
+	if rest, ok := strings.CutPrefix(body, "- "); ok {
+		return strings.TrimLeft(rest, " \t")
+	}
+	for _, marker := range []string{"* ", "+ "} {
+		if rest, ok := strings.CutPrefix(body, marker); ok {
+			return strings.TrimLeft(rest, " \t")
+		}
+	}
+	digits := len(body) - len(strings.TrimLeft(body, "0123456789"))
+	if digits > 0 && len(body) > digits+1 && (body[digits] == '.' || body[digits] == ')') && body[digits+1] == ' ' {
+		return strings.TrimLeft(body[digits+2:], " \t")
+	}
+	return body
+}
+
+// openingFence returns the marker run of a code fence opener (three or more
+// backticks or tildes; a backtick fence's info string holds no backtick), or
+// "" when body does not open a fence.
+func openingFence(body string) string {
+	if body == "" || (body[0] != '`' && body[0] != '~') {
+		return ""
+	}
+	run := len(body) - len(strings.TrimLeft(body, body[:1]))
+	if run < 3 || (body[0] == '`' && strings.Contains(body[run:], "`")) {
+		return ""
+	}
+	return body[:run]
+}
+
+// closesFence reports whether body closes the fence opened with marker: a run
+// of the same character at least as long, with nothing after it.
+func closesFence(body, marker string) bool {
+	body = strings.TrimRight(body, " \t\r\n")
+	return len(body) >= len(marker) && strings.Trim(body, marker[:1]) == ""
+}
+
+// markCodeSpans marks the inline code spans of one paragraph: a backtick run
+// opens a span that the next run of exactly the same length closes, a run
+// with no closer is literal, and a backslash-escaped backtick opens nothing.
+func markCodeSpans(text string, code []bool) {
+	for i := 0; i < len(text); {
+		switch text[i] {
+		case '\\':
+			i += 2
+			continue
+		case '`':
+		default:
+			i++
+			continue
+		}
+		open := backtickRun(text, i)
+		end := -1
+		for j := i + open; j < len(text); {
+			if text[j] != '`' {
+				j++
+				continue
+			}
+			run := backtickRun(text, j)
+			if run == open {
+				end = j + run
+				break
+			}
+			j += run
+		}
+		if end < 0 {
+			i += open
+			continue
+		}
+		markBytes(code[i:end])
+		i = end
+	}
+}
+
+func backtickRun(text string, i int) int {
+	n := 0
+	for i+n < len(text) && text[i+n] == '`' {
+		n++
+	}
+	return n
 }
 
 // guardVerifiedDate returns the edit's content with its frontmatter
