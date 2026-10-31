@@ -160,9 +160,9 @@ var transientNeedles = []struct {
 	// fuse: in each case the step's real work is done and only the final text
 	// shape is wrong. Same rationale as the prose needle above. Generic schema
 	// validation failures stay non-transient (see the schema_validation
-	// negative case), and so do two objects that each validate on their own,
-	// which are competing verdicts rather than one split answer; only these two
-	// parse-specific strings are added.
+	// negative case); only these two parse-specific strings are added. (Two
+	// objects that each validate on their own are no error at all: the last one
+	// wins, see parseStructuredTextOutput.)
 	{"invalid character '<' after top-level value", "provider protocol residue after JSON"},
 	{"split bare json objects could not be fused into one valid object", "unfused split bare JSON objects"},
 }

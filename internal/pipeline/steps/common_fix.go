@@ -26,10 +26,13 @@ type fixExecutionOptions struct {
 	ErrorPrefix             string
 	FallbackSummary         string
 	AfterAgentRun           func(*agent.Result) error
-	AgentContext            context.Context
+	// AgentContext is the agent call's context, and with RunAgent set it still
+	// tells a rejected summary from a turn its context cut.
+	AgentContext context.Context
 	// RunAgent overrides the agent-call seam while leaving preparation and
 	// post-agent commit work on the step context. Review uses it to create a
-	// fresh review_agent_timeout context at the instant each fixer starts.
+	// fresh review_agent_timeout context at the instant each fixer starts, and
+	// Test to run the repair turn under its stall window.
 	RunAgent func(agent.RunOpts) (*agent.Result, error)
 	// SessionRole, when set, runs the fix turn in that durable review-loop
 	// session (the review step's fixer role). Steps outside the review loop
@@ -411,6 +414,22 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 	return cleaned, nil
 }
 
+// fixSummaryRejected reports whether a fix turn's error is only its final
+// summary being absent, malformed, or rejected by the schema. The turn's edits
+// are its work and the summary is just the commit subject, so executeFixMode
+// commits them under the fallback summary and the round goes on to judge them
+// (Review's rereview, or the step's own checks); the turn is never retried. A
+// rejection from a turn its deadline or a cancellation cut short is not a
+// formatting slip and still fails the step, and so does every other failure,
+// including Claude's error_max_structured_output_retries, which is not a
+// rejection.
+func fixSummaryRejected(sctx *pipeline.StepContext, agentCtx context.Context, err error) bool {
+	if !agent.IsStructuredOutputRejected(err) || pipeline.IsAgentDeadlineError(err) {
+		return false
+	}
+	return sctx.Ctx.Err() == nil && (agentCtx == nil || agentCtx.Err() == nil)
+}
+
 func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fixExecutionOptions) (string, error) {
 	if !sctx.Fixing {
 		return "", nil
@@ -435,16 +454,17 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	}
 	var result *agent.Result
 	var err error
+	agentCtx := sctx.Ctx
+	if opts.AgentContext != nil {
+		agentCtx = opts.AgentContext
+	}
 	if opts.RunAgent != nil {
 		result, err = opts.RunAgent(runOpts)
 	} else {
-		agentCtx := sctx.Ctx
-		if opts.AgentContext != nil {
-			agentCtx = opts.AgentContext
-		}
 		result, err = sctx.RunAgentSessionContext(agentCtx, opts.SessionRole, runOpts)
 	}
-	if err != nil {
+	summaryRejected := err != nil && fixSummaryRejected(sctx, agentCtx, err)
+	if err != nil && !summaryRejected {
 		if opts.ErrorPrefix == "" {
 			return "", err
 		}
@@ -455,8 +475,10 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 			return "", err
 		}
 	}
-	summary, err := extractCommitSummary(result)
-	if err != nil {
+	var summary string
+	if summaryRejected {
+		sctx.Log(fmt.Sprintf("warning: fix summary rejected, committing under the fallback summary: %v", err))
+	} else if summary, err = extractCommitSummary(result); err != nil {
 		if errors.Is(err, errRejectedCommitSummary) {
 			return "", fmt.Errorf("validate %s fix summary: %w", stepName, err)
 		}

@@ -46,6 +46,8 @@ review_agent_timeout: "30m"
 
 test_agent_timeout: "30m"
 
+test_agent_stall_timeout: "10m"
+
 daemon_connect_timeout: "3s"
 
 branch_sync_remote_timeout: "60s"
@@ -595,7 +597,7 @@ For older active runs that do not yet have activity rows, AXI falls back to the 
 
 Maximum wall-clock time for one pipeline agent invocation that does not already have a more specific deadline.
 This is the default-by-construction budget: Document, Lint, PR drafting, CI auto-fix, and any future agent-spawning step are bounded even if they forget to install their own timer.
-Review still uses [`review_agent_timeout`](#review_agent_timeout) for each review or fix invocation, Test still uses [`test_agent_timeout`](#test_agent_timeout) per invocation, and Intent keeps its five-minute extraction cap; any existing deadline is honored rather than capped.
+Review still uses [`review_agent_timeout`](#review_agent_timeout) for each review or fix invocation, Test still uses [`test_agent_timeout`](#test_agent_timeout) (and [`test_agent_stall_timeout`](#test_agent_stall_timeout)) per invocation, and Intent keeps its five-minute extraction cap; any existing deadline is honored rather than capped.
 When this deadline expires, the agent is cancelled and the invocation returns a timeout diagnostic instead of remaining active indefinitely. Most agent-driven mutation steps fail the run, CI auto-fix parks for a user decision, and PR drafting follows its existing agent-error fallback and continues with deterministic content. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the approval behavior.
 A late successful return after the deadline is rejected, so post-agent commits and PR content cannot use work from a timed-out turn.
 
@@ -661,6 +663,28 @@ Non-positive values are rejected when loading the global config.
 Raise it for repositories whose targeted tests or evidence gathering legitimately run long; a suite that itself takes close to 30 minutes leaves almost no slack against provider slowness under the default.
 The shipped default stays a stall bound and is not raised automatically.
 It bounds only the Test step, and no other step or environment variable overrides it.
+
+### test_agent_stall_timeout
+
+Liveness window for one Test-step agent invocation: the evidence-gathering turn, each correction turn, and a Test-repair turn.
+An invocation that shows no activity for this long is cut as a stall instead of holding the run for the whole [`test_agent_timeout`](#test_agent_timeout).
+Activity is streamed assistant text or the agent's own liveness signal: bytes on a native agent's output, a text, reasoning, or tool event of the turn's own session for opencode, or a text, part, or tool event of the turn's stream for rovodev.
+An opencode session status, which is how opencode reports a provider retry, is not activity.
+A stall before any activity is retried once with the same request, because nothing ran that a replay could repeat.
+A stall after any activity, or a second stall, parks the step for a decision with the ask-user finding `test-agent-stall` and the measured activity.
+That park is the same as a budget cut's: the baseline result, the findings a cut fix round was answering, and any unvalidated work are kept, approval is refused while unvalidated work remains, approving it otherwise is a Test exception (`passed-with-override`), and a fix response whose selection holds only the stall re-runs validation without a repair turn.
+Guidance you attach to the stall finding is given to that re-run validation.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `10m`                  |
+
+Accepts any Go `time.ParseDuration` string.
+`0` means the default, and `off` or any negative value disables the window, leaving only `test_agent_timeout`.
+A window not shorter than `test_agent_timeout` has no effect, because the budget cuts the invocation first; the Test step logs that once per run.
+Raise it, or turn it off, for a repository whose Test agent legitimately runs commands that print nothing for longer than the window.
+It is global-only: a repository's `.no-mistakes.yaml` cannot change it.
 
 ### daemon_connect_timeout
 
@@ -863,6 +887,7 @@ The template supports literal text and three Go-style placeholders:
 The value must be a valid UTF-8 template that renders to a non-empty, single-line commit subject.
 The template source is limited to 1,024 bytes and 16 placeholders.
 The fix-agent summary and final rendered subject are each limited to 4,096 bytes.
+In the Review, Test, and Lint fix rounds and repository gate repairs, a fix turn whose summary cannot be read (absent, not valid JSON, or rejected by the output schema) still commits its edits under the step's fallback summary, unless its deadline or a cancellation cut the turn short.
 Before rendering, no-mistakes predicts the subject size from the validated literal text and placeholders, then rejects oversized output without allocating the expanded message.
 Template functions, control actions, named templates, unknown placeholders, malformed syntax, control characters, unsafe Unicode format characters, and Unicode line or paragraph separators cause configuration loading to fail.
 The blocked format set includes every Unicode `Bidi_Control` code point plus `U+00AD`, `U+180E`, `U+200B`, `U+2060` through `U+2064`, the deprecated bidi controls `U+206A` through `U+206F`, `U+FEFF`, `U+FFF9` through `U+FFFB`, and Unicode tag characters in `U+E0000` through `U+E007F`.

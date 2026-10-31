@@ -241,8 +241,12 @@ type opencodeTextPart struct {
 
 // opencodeStreamState holds mutable state during SSE event processing.
 type opencodeStreamState struct {
-	sessionID     string
-	onChunk       func(string)
+	sessionID string
+	onChunk   func(string)
+	// onActivity is the throttled LifecyclePhaseActivity observer (nil when
+	// nobody observes the invocation). opencode is not a native subprocess,
+	// so its own session's part events are the only liveness evidence.
+	onActivity    func()
 	textParts     map[string]*opencodeTextPart
 	textPartOrder []string
 	usageByMsg    map[string]TokenUsage

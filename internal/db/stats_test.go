@@ -185,12 +185,12 @@ func TestGetStatsDoesNotCountTestBudgetCutsAsFixedMistakes(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/repo/cut", "git@example.com:cut.git", "main")
 
-	// Two cuts in a row, then a validation-only fix round that completes. Each
-	// cut's description names a different killed process.
+	// A budget cut then a stall, then a validation-only fix round that
+	// completes. Each cut's description names a different killed process.
 	cutOnly, _ := d.InsertRun(repo.ID, "cut-only", "head", "base")
 	cutOnlyTest, _ := d.InsertStepResult(cutOnly.ID, types.StepTest)
 	firstCut := `{"findings":[{"id":"test-agent-timeout","severity":"warning","description":"cut (pid 101)","action":"ask-user"},{"id":"test-agent-unvalidated-work","severity":"error","description":"holds foo_test.go","action":"ask-user"}],"summary":"cut"}`
-	secondCut := `{"findings":[{"id":"test-agent-timeout","severity":"warning","description":"cut (pid 202)","action":"ask-user"}],"summary":"cut"}`
+	secondCut := `{"findings":[{"id":"test-agent-stall","severity":"warning","description":"stall (pid 202)","action":"ask-user"}],"summary":"cut"}`
 	if _, err := d.InsertStepRound(cutOnlyTest.ID, 1, "initial", &firstCut, nil, 100); err != nil {
 		t.Fatal(err)
 	}

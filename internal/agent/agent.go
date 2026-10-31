@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
-	"reflect"
 	"strings"
 	"time"
 	"unicode"
@@ -371,7 +369,7 @@ func finalizeTextResult(agentName, text string, schema json.RawMessage, usage To
 		return textResult(text, usage), nil
 	}
 
-	output, err := parseStructuredTextOutput(text, schema, strings.HasPrefix(agentName, "acp:"))
+	output, err := parseStructuredTextOutput(text, schema)
 	if err != nil {
 		return resultFromUsage(usage), rejectStructuredOutput(fmt.Errorf("%s output parse: %w (output snippet: %q)", agentName, err, outputSnippet(text)))
 	}
@@ -394,7 +392,22 @@ func outputSnippet(text string) string {
 	return trimmed
 }
 
-func parseStructuredTextOutput(text string, schema json.RawMessage, preferTerminal bool) (json.RawMessage, error) {
+// structuredCandidate is one schema-valid JSON value found in agent text,
+// with the byte offsets where it starts and ends in the output.
+type structuredCandidate struct {
+	obj   json.RawMessage
+	start int
+	end   int
+}
+
+// parseStructuredTextOutput reads an agent's structured answer out of its
+// final text. When more than one candidate (a closed fence, an open fence, or
+// a concluding bare object) validates, the one that ends last in the output
+// wins and the earlier ones are dropped, for every adapter: an agent that
+// restates or revises its answer means its final word. Closed fences still
+// beat open (unclosed) ones; an open candidate is consulted only when no
+// closed fence validates.
+func parseStructuredTextOutput(text string, schema json.RawMessage) (json.RawMessage, error) {
 	validationSchema, err := textValidationSchema(schema)
 	if err != nil {
 		return nil, err
@@ -408,59 +421,42 @@ func parseStructuredTextOutput(text string, schema json.RawMessage, preferTermin
 	closed, openCands := fencedJSONCandidates(text)
 
 	var candidateErr error
-	parseCandidates := func(cands []string) []json.RawMessage {
-		var parsed []json.RawMessage
+	lastValid := func(cands []fencedCandidate) *structuredCandidate {
+		var last *structuredCandidate
 		for _, candidate := range cands {
-			fenced, err := parseStructuredCandidate([]byte(candidate), validationSchema)
+			fenced, err := parseStructuredCandidate([]byte(candidate.body), validationSchema)
 			if err == nil {
-				parsed = append(parsed, fenced)
+				last = &structuredCandidate{obj: fenced, start: candidate.start, end: candidate.end}
 				continue
 			}
 			if candidateErr == nil {
 				candidateErr = err
 			}
 		}
-		return parsed
+		return last
 	}
 	// Closed fences are the canonical structured-output shape and win over
 	// open (unclosed, pi JSONL) candidates: prose that quotes ```json as an
 	// inline example never shadows a real trailing block, and an unclosed
 	// fence never competes with a closed one. Only when no closed fence
 	// parses do we consult the open candidates.
-	closedParsed := parseCandidates(closed)
-	if len(closedParsed) > 1 {
-		return nil, fmt.Errorf("multiple JSON code fences found in output")
-	}
-	openParsed := parseCandidates(openCands)
-	if len(openParsed) > 1 {
-		return nil, fmt.Errorf("multiple JSON code fences found in output")
+	closedWinner := lastValid(closed)
+	winner := closedWinner
+	if winner == nil {
+		winner = lastValid(openCands)
 	}
 
-	var fenced json.RawMessage
-	if len(closedParsed) == 1 {
-		fenced = closedParsed[0]
-	} else if len(openParsed) == 1 {
-		fenced = openParsed[0]
+	bare, bareErr := concludingBareJSONObject(text, validationSchema)
+	if bare != nil && closedWinner != nil && insideOpenFence(bare, openCands) {
+		// The bare scan reads through an unclosed fence, so an object in its
+		// body is that open candidate again and must not outrank a closed one.
+		bare = nil
 	}
-
-	bareParsed, bareErr := bareJSONObjects(text, validationSchema)
-	if len(bareParsed) > 1 {
-		if !preferTerminal {
-			return nil, fmt.Errorf("multiple bare JSON objects found in output")
-		}
-		bareParsed = bareParsed[len(bareParsed)-1:]
+	if bare != nil && (winner == nil || bare.end > winner.end) {
+		winner = bare
 	}
-	if fenced != nil && len(bareParsed) == 1 {
-		if !jsonEqual(fenced, bareParsed[0]) {
-			return nil, fmt.Errorf("conflicting JSON candidates found in output")
-		}
-		return fenced, nil
-	}
-	if fenced != nil {
-		return fenced, nil
-	}
-	if len(bareParsed) == 1 {
-		return bareParsed[0], nil
+	if winner != nil {
+		return winner.obj, nil
 	}
 	if candidateErr == nil && bareErr != nil {
 		candidateErr = bareErr
@@ -480,6 +476,15 @@ func parseStructuredTextOutput(text string, schema json.RawMessage, preferTermin
 	return nil, rawErr
 }
 
+func insideOpenFence(candidate *structuredCandidate, open []fencedCandidate) bool {
+	for _, fence := range open {
+		if candidate.start >= fence.start {
+			return true
+		}
+	}
+	return false
+}
+
 func textValidationSchema(schema json.RawMessage) (json.RawMessage, error) {
 	if len(schema) == 0 {
 		return nil, nil
@@ -493,6 +498,15 @@ func textValidationSchema(schema json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(value)
 }
 
+// fencedCandidate is the body of one ```json fence with the byte offsets in
+// the whole output where its body starts and where the fence ends: just past
+// its closing marker, or the end of the output for an unclosed fence.
+type fencedCandidate struct {
+	body  string
+	start int
+	end   int
+}
+
 // fencedJSONCandidates extracts JSON bodies from ```json ... ``` fences.
 // Fence markers may appear anywhere in the text, including glued to the end
 // of a preceding line (e.g. "...behavior.```json"), which is a shape real
@@ -504,9 +518,10 @@ func textValidationSchema(schema json.RawMessage) (json.RawMessage, error) {
 // (the pi JSONL shape). The scan never stops at the first opener: an opener
 // whose candidate spans unrelated prose (e.g. prose quoting ```json as an
 // inline example) must not swallow a later, real fence block.
-func fencedJSONCandidates(text string) (closed, open []string) {
+func fencedJSONCandidates(text string) (closed, open []fencedCandidate) {
 	rest := text
 	for {
+		offset := len(text) - len(rest)
 		marker := strings.Index(rest, "```")
 		if marker < 0 {
 			return closed, open
@@ -523,16 +538,16 @@ func fencedJSONCandidates(text string) (closed, open []string) {
 			continue
 		}
 		body := rest[contentStart:]
-		end, _ := indexJSONFenceClose(body)
+		end, closeEnd := indexJSONFenceClose(body)
 		if end < 0 {
 			// No closing fence: the JSON body runs to the end of the output
 			// (pi JSONL shape). Take everything after the opener as an open
 			// candidate; parseStructuredCandidate validates it later and
 			// only adopts it when it is actually valid JSON.
-			open = append(open, body)
+			open = append(open, fencedCandidate{body: body, start: offset + contentStart, end: len(text)})
 			return closed, open
 		}
-		closed = append(closed, body[:end])
+		closed = append(closed, fencedCandidate{body: body[:end], start: offset + contentStart, end: offset + contentStart + closeEnd})
 		// Resume after the opener marker, not after this candidate's closing
 		// fence: an unvalidated candidate may span unrelated text, and a
 		// later real block must still be discovered on its own.
@@ -645,14 +660,16 @@ type bareObject struct {
 	endIndex   int
 }
 
-// bareJSONObjects scans text for balanced {...} substrings outside code fences
-// that parse as JSON and validate against the schema. Only concluding objects
-// are candidates; an incidental object followed by substantive prose is not a
-// verdict, and provider protocol residue after a complete object is. A single
-// answer split across adjacent objects - nothing between them but whitespace or
-// a single comma - is returned as their union when their keys are disjoint and
-// the union validates (see fuseAdjacentBareObjects).
-func bareJSONObjects(text string, schema json.RawMessage) ([]json.RawMessage, error) {
+// concludingBareJSONObject scans text for balanced {...} substrings outside
+// code fences that parse as JSON and validate against the schema, and returns
+// the last of them when it is concluding. Earlier valid objects are dropped
+// (the last one wins), and an object followed by substantive prose is not a
+// verdict even when it is the last valid one, while provider protocol residue
+// after a complete object is allowed. When no object validates on its own, a
+// single answer split across adjacent objects - nothing between them but
+// whitespace or a single comma - is returned as their union when their keys
+// are disjoint and the union validates (see fuseAdjacentBareObjects).
+func concludingBareJSONObject(text string, schema json.RawMessage) (*structuredCandidate, error) {
 	var valid []bareObject
 	var objects []bareObject
 	var lastErr error
@@ -690,29 +707,21 @@ func bareJSONObjects(text string, schema json.RawMessage) ([]json.RawMessage, er
 		objects = append(objects, entry)
 		i = end - 1
 	}
-	if len(valid) > 1 {
-		parsed := make([]json.RawMessage, 0, len(valid))
-		for _, candidate := range valid {
-			parsed = append(parsed, candidate.obj)
+	if len(valid) > 0 {
+		last := valid[len(valid)-1]
+		if trailingNonJSONResidue(text[last.endIndex:]) {
+			return &structuredCandidate{obj: last.obj, start: last.startIndex, end: last.endIndex}, nil
 		}
-		return parsed, nil
+		return nil, lastErr
 	}
-	if len(valid) == 1 && trailingNonJSONResidue(text[valid[0].endIndex:]) {
-		return []json.RawMessage{valid[0].obj}, nil
-	}
-	if len(valid) == 0 {
-		fused, err := fuseAdjacentBareObjects(text, objects, schema)
-		if err != nil {
-			return nil, err
-		}
-		if fused != nil {
-			return []json.RawMessage{fused}, nil
-		}
+	fused, err := fuseAdjacentBareObjects(text, objects, schema)
+	if fused != nil || err != nil {
+		return fused, err
 	}
 	return nil, lastErr
 }
 
-// trailingNonJSONResidue reports whether rest - the text following a single
+// trailingNonJSONResidue reports whether rest - the text following the last
 // schema-valid bare object - is provider protocol residue rather than a second
 // structured answer or a prose continuation. Providers occasionally append
 // stray closing tool-call delimiters after a complete JSON object (DeepSeek's
@@ -801,7 +810,7 @@ var errDuplicateBareObjectKey = errors.New("adjacent bare JSON objects share a t
 // cannot be fused reports errSplitBareObjects rather than the generic schema
 // error. A run whose keys repeat is competing values, not a recoverable split,
 // and falls through to the generic schema error so it stays terminal.
-func fuseAdjacentBareObjects(text string, objects []bareObject, schema json.RawMessage) (json.RawMessage, error) {
+func fuseAdjacentBareObjects(text string, objects []bareObject, schema json.RawMessage) (*structuredCandidate, error) {
 	for i := 0; i < len(objects); {
 		j := i
 		for j+1 < len(objects) && isBareObjectSeparator(text[objects[j].endIndex:objects[j+1].startIndex]) {
@@ -810,7 +819,7 @@ func fuseAdjacentBareObjects(text string, objects []bareObject, schema json.RawM
 		if j > i && trailingNonJSONResidue(text[objects[j].endIndex:]) {
 			fused, err := fuseBareObjects(objects[i:j+1], schema)
 			if err == nil {
-				return fused, nil
+				return &structuredCandidate{obj: fused, start: objects[i].startIndex, end: objects[j].endIndex}, nil
 			}
 			if errors.Is(err, errSplitBareObjects) {
 				return nil, errSplitBareObjects
@@ -856,149 +865,6 @@ func fuseBareObjects(objects []bareObject, schema json.RawMessage) (json.RawMess
 		return nil, errSplitBareObjects
 	}
 	return out, nil
-}
-
-func jsonEqual(a, b json.RawMessage) bool {
-	if bytes.Equal(bytes.TrimSpace(a), bytes.TrimSpace(b)) {
-		return true
-	}
-	valA, err := decodeJSONValue(a)
-	if err != nil {
-		return false
-	}
-	valB, err := decodeJSONValue(b)
-	if err != nil {
-		return false
-	}
-	return jsonValuesEqual(valA, valB)
-}
-
-func jsonValuesEqual(a, b any) bool {
-	switch valueA := a.(type) {
-	case json.Number:
-		valueB, ok := b.(json.Number)
-		if !ok {
-			return false
-		}
-		return jsonNumbersEqual(valueA, valueB)
-	case map[string]any:
-		valueB, ok := b.(map[string]any)
-		if !ok || len(valueA) != len(valueB) {
-			return false
-		}
-		for key, childA := range valueA {
-			childB, ok := valueB[key]
-			if !ok || !jsonValuesEqual(childA, childB) {
-				return false
-			}
-		}
-		return true
-	case []any:
-		valueB, ok := b.([]any)
-		if !ok || len(valueA) != len(valueB) {
-			return false
-		}
-		for i := range valueA {
-			if !jsonValuesEqual(valueA[i], valueB[i]) {
-				return false
-			}
-		}
-		return true
-	default:
-		return reflect.DeepEqual(a, b)
-	}
-}
-
-type jsonDecimal struct {
-	negative bool
-	digits   string
-	power    *big.Int
-}
-
-func jsonNumbersEqual(a, b json.Number) bool {
-	decimalA, ok := parseJSONDecimal(a)
-	if !ok {
-		return false
-	}
-	decimalB, ok := parseJSONDecimal(b)
-	if !ok {
-		return false
-	}
-	if decimalA.digits == "" || decimalB.digits == "" {
-		return decimalA.digits == decimalB.digits
-	}
-	if decimalA.negative != decimalB.negative {
-		return false
-	}
-
-	orderA := decimalOrder(decimalA)
-	orderB := decimalOrder(decimalB)
-	if orderA.Cmp(orderB) != 0 {
-		return false
-	}
-
-	maxDigits := len(decimalA.digits)
-	if len(decimalB.digits) > maxDigits {
-		maxDigits = len(decimalB.digits)
-	}
-	for i := 0; i < maxDigits; i++ {
-		digitA, digitB := byte('0'), byte('0')
-		if i < len(decimalA.digits) {
-			digitA = decimalA.digits[i]
-		}
-		if i < len(decimalB.digits) {
-			digitB = decimalB.digits[i]
-		}
-		if digitA != digitB {
-			return false
-		}
-	}
-	return true
-}
-
-func parseJSONDecimal(number json.Number) (jsonDecimal, bool) {
-	raw := number.String()
-	negative := strings.HasPrefix(raw, "-")
-	if negative {
-		raw = raw[1:]
-	}
-
-	exponent := new(big.Int)
-	mantissa := raw
-	if exponentIndex := strings.IndexAny(raw, "eE"); exponentIndex >= 0 {
-		mantissa = raw[:exponentIndex]
-		exponentText := raw[exponentIndex+1:]
-		if strings.HasPrefix(exponentText, "+") {
-			exponentText = exponentText[1:]
-		}
-		if exponentText == "" {
-			return jsonDecimal{}, false
-		}
-		if _, ok := exponent.SetString(exponentText, 10); !ok {
-			return jsonDecimal{}, false
-		}
-	}
-
-	fractionalPart := ""
-	if dotIndex := strings.IndexByte(mantissa, '.'); dotIndex >= 0 {
-		fractionalPart = mantissa[dotIndex+1:]
-		mantissa = mantissa[:dotIndex] + fractionalPart
-	}
-
-	digits := strings.TrimLeft(mantissa, "0")
-	if digits == "" {
-		return jsonDecimal{}, true
-	}
-	trimmedDigits := strings.TrimRight(digits, "0")
-	trailingZeros := len(digits) - len(trimmedDigits)
-	power := new(big.Int).Sub(exponent, big.NewInt(int64(len(fractionalPart))))
-	power.Add(power, big.NewInt(int64(trailingZeros)))
-	return jsonDecimal{negative: negative, digits: trimmedDigits, power: power}, true
-}
-
-func decimalOrder(decimal jsonDecimal) *big.Int {
-	order := new(big.Int).Set(decimal.power)
-	return order.Add(order, big.NewInt(int64(len(decimal.digits))))
 }
 
 // scanBalancedObject returns the exclusive end index of a brace-balanced

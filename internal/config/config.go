@@ -53,6 +53,13 @@ const (
 	// the post-test evidence-gathering turn and a Test-repair turn, so a stalled
 	// agent cannot leave a run active forever.
 	DefaultTestAgentTimeout = 30 * time.Minute
+	// DefaultTestAgentStallTimeout is the liveness window of one Test-step
+	// agent invocation: an invocation with no streamed text or agent activity
+	// for this long is cut as a stall instead of burning its whole budget.
+	DefaultTestAgentStallTimeout = 10 * time.Minute
+	// TestAgentStallTimeoutOff is the resolved test_agent_stall_timeout of
+	// "off" or any negative duration: the Test step watches no window.
+	TestAgentStallTimeoutOff = time.Duration(-1)
 	// DefaultDaemonConnectTimeout bounds client IPC connection attempts to a
 	// daemon socket that exists but is not accepting connections.
 	DefaultDaemonConnectTimeout = 3 * time.Second
@@ -170,6 +177,7 @@ type GlobalConfig struct {
 	AgentTimeout            time.Duration     `yaml:"-"`
 	ReviewAgentTimeout      time.Duration     `yaml:"-"`
 	TestAgentTimeout        time.Duration     `yaml:"-"`
+	TestAgentStallTimeout   time.Duration     `yaml:"-"`
 	DaemonConnectTimeout    time.Duration     `yaml:"-"`
 	BranchSyncRemoteTimeout time.Duration     `yaml:"-"`
 	// GateReconcileInterval / GateReconcileTimeout bound how often and how
@@ -231,6 +239,7 @@ type globalConfigRaw struct {
 	AgentTimeout            string                       `yaml:"agent_timeout"`
 	ReviewAgentTimeout      string                       `yaml:"review_agent_timeout"`
 	TestAgentTimeout        string                       `yaml:"test_agent_timeout"`
+	TestAgentStallTimeout   string                       `yaml:"test_agent_stall_timeout"`
 	LogLevel                string                       `yaml:"log_level"`
 	SessionReuse            *bool                        `yaml:"session_reuse"`
 	AutoFix                 AutoFixRaw                   `yaml:"auto_fix"`
@@ -690,6 +699,10 @@ type Config struct {
 	AgentTimeout          time.Duration
 	ReviewAgentTimeout    time.Duration
 	TestAgentTimeout      time.Duration
+	// TestAgentStallTimeout is the resolved test_agent_stall_timeout: zero
+	// means the default window, TestAgentStallTimeoutOff (any negative value)
+	// means off. Read it through TestAgentStallWindow.
+	TestAgentStallTimeout time.Duration
 	GateReconcileInterval time.Duration
 	GateReconcileTimeout  time.Duration
 	LogLevel              string
@@ -1150,6 +1163,14 @@ review_agent_timeout: "30m"
 # for a long suite.
 test_agent_timeout: "30m"
 
+# Liveness window of one Test-step agent invocation: an invocation that streams
+# no text and reports no activity for this long is cut as a stall instead of
+# burning the whole test_agent_timeout. A silent stall is retried once; any
+# other stall parks for a decision. "0" means this default, "off" (or any
+# negative value) disables it, and a value not shorter than test_agent_timeout
+# has no effect.
+test_agent_stall_timeout: "10m"
+
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
 daemon_connect_timeout: "3s"
@@ -1580,6 +1601,33 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 	return name, true, bin, nil
 }
 
+// TestAgentInvocationTimeout is the wall-clock budget of one Test-step agent
+// invocation: a positive TestAgentTimeout, otherwise the default.
+func (c *Config) TestAgentInvocationTimeout() time.Duration {
+	if c != nil && c.TestAgentTimeout > 0 {
+		return c.TestAgentTimeout
+	}
+	return DefaultTestAgentTimeout
+}
+
+// TestAgentStallWindow is the effective stall window of one Test-step agent
+// invocation, or 0 when none is watched: the setting is off, or the window is
+// not shorter than the invocation budget, which cuts the invocation first.
+// noEffect reports that last case so the caller can say so.
+func (c *Config) TestAgentStallWindow() (window time.Duration, noEffect bool) {
+	window = DefaultTestAgentStallTimeout
+	if c != nil && c.TestAgentStallTimeout != 0 {
+		window = c.TestAgentStallTimeout
+	}
+	if window < 0 {
+		return 0, false
+	}
+	if window >= c.TestAgentInvocationTimeout() {
+		return 0, true
+	}
+	return window, false
+}
+
 // AgentPath returns the binary path for the configured agent.
 // ACP agents and ACP aliases use acpx_path if set, otherwise acpx.
 // Native agents use agent_path_override if set, otherwise the default binary name.
@@ -1992,6 +2040,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		AgentTimeout:            DefaultAgentTimeout,
 		ReviewAgentTimeout:      DefaultReviewAgentTimeout,
 		TestAgentTimeout:        DefaultTestAgentTimeout,
+		TestAgentStallTimeout:   DefaultTestAgentStallTimeout,
 		DaemonConnectTimeout:    DefaultDaemonConnectTimeout,
 		BranchSyncRemoteTimeout: DefaultBranchSyncRemoteTimeout,
 		GateReconcileInterval:   DefaultGateReconcileInterval,
@@ -2262,6 +2311,13 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		}
 		cfg.TestAgentTimeout = d
 	}
+	if raw.TestAgentStallTimeout != "" {
+		d, err := parseTestAgentStallTimeout(raw.TestAgentStallTimeout)
+		if err != nil {
+			return nil, err
+		}
+		cfg.TestAgentStallTimeout = d
+	}
 	if raw.DaemonConnectTimeout != "" {
 		d, err := parsePositiveDuration("daemon_connect_timeout", raw.DaemonConnectTimeout)
 		if err != nil {
@@ -2393,6 +2449,25 @@ func parseCITimeout(value string) (time.Duration, error) {
 	}
 	if d <= 0 {
 		return CITimeoutUnlimited, nil
+	}
+	return d, nil
+}
+
+// parseTestAgentStallTimeout interprets test_agent_stall_timeout: "off" or a
+// negative duration resolves to TestAgentStallTimeoutOff, zero to the default.
+func parseTestAgentStallTimeout(value string) (time.Duration, error) {
+	if strings.EqualFold(strings.TrimSpace(value), "off") {
+		return TestAgentStallTimeoutOff, nil
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("parse test_agent_stall_timeout %q: %w", value, err)
+	}
+	switch {
+	case d < 0:
+		return TestAgentStallTimeoutOff, nil
+	case d == 0:
+		return DefaultTestAgentStallTimeout, nil
 	}
 	return d, nil
 }
@@ -3173,6 +3248,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		AgentTimeout:          global.AgentTimeout,
 		ReviewAgentTimeout:    global.ReviewAgentTimeout,
 		TestAgentTimeout:      global.TestAgentTimeout,
+		TestAgentStallTimeout: global.TestAgentStallTimeout,
 		GateReconcileInterval: global.GateReconcileInterval,
 		GateReconcileTimeout:  global.GateReconcileTimeout,
 		LogLevel:              global.LogLevel,

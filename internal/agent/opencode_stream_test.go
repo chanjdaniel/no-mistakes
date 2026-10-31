@@ -743,3 +743,42 @@ data: {"payload":{"type":"message.updated","properties":{"sessionID":"s1","info"
 		t.Errorf("expected lastText 'partial', got %q", state.lastText)
 	}
 }
+
+// TestParseOpencodeSSE_OwnSessionPartEventsAreActivity covers the liveness
+// signal opencode emits: opencode is not a native subprocess, so its event
+// stream is the only evidence that a turn is working. Every text, reasoning,
+// and tool event of its own session counts; another session's events, global
+// events, and session status (which reports a provider retry while nothing is
+// produced) do not.
+func TestParseOpencodeSSE_OwnSessionPartEventsAreActivity(t *testing.T) {
+	input := strings.Join([]string{
+		`data: {"payload":{"type":"server.connected","properties":{}}}`,
+		`data: {"payload":{"type":"server.heartbeat","properties":{}}}`,
+		`data: {"payload":{"type":"session.status","properties":{"sessionID":"s1","status":{"type":"retry","attempt":1}}}}`,
+		`data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"other","part":{"id":"x1","messageID":"m9","type":"tool"}}}}`,
+		`data: {"payload":{"type":"message.part.delta","properties":{"sessionID":"other","field":"text","partID":"x2","delta":"not ours"}}}`,
+		// A part event that names no session is not proven to be ours.
+		`data: {"payload":{"type":"message.part.updated","properties":{"part":{"id":"x3","messageID":"m8","type":"tool"}}}}`,
+		// Ours: reasoning, a tool starting and finishing, then text.
+		`data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"r1","messageID":"m1","type":"reasoning","text":"thinking"}}}}`,
+		`data: {"payload":{"type":"message.part.delta","properties":{"sessionID":"s1","field":"text","partID":"r1","delta":" more"}}}`,
+		`data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"t1","messageID":"m1","type":"tool","state":{"status":"running"}}}}}`,
+		`data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"t1","messageID":"m1","type":"tool","state":{"status":"completed"}}}}}`,
+		`data: {"payload":{"type":"message.part.delta","properties":{"sessionID":"s1","field":"text","partID":"p1","delta":"done"}}}`,
+		`data: {"payload":{"type":"session.idle","properties":{"sessionID":"s1"}}}`,
+		``,
+	}, "\n\n")
+	activity := 0
+	state := &opencodeStreamState{
+		sessionID:  "s1",
+		textParts:  make(map[string]*opencodeTextPart),
+		usageByMsg: make(map[string]TokenUsage),
+		onActivity: func() { activity++ },
+	}
+	if err := parseOpencodeSSE(strings.NewReader(input), state); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if activity != 5 {
+		t.Fatalf("activity = %d, want one per own-session part event (5)", activity)
+	}
+}

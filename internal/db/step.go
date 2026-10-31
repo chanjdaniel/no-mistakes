@@ -279,7 +279,7 @@ func (d *DB) SetTestApprovalReason(id, reason string) error {
 
 // TestOverrideReason qualifies completed Test exceptions on both snapshot and
 // event paths. Only an approval past a failing configured command, a no-go
-// or inconclusive verdict, or a Test-agent invocation-budget cut is an
+// or inconclusive verdict, or a Test-agent invocation-budget or stall cut is an
 // exception; approving a no-surface park keeps its recorded reason but
 // completes normally. Older command overrides still qualify without a
 // recorded reason.
@@ -320,8 +320,11 @@ func (s *StepResult) testExceptionCondition() string {
 		return "live validation verdict: " + findings.Verdict
 	}
 	for _, item := range findings.Items {
-		if item.ID == types.FindingIDTestAgentTimeout {
+		switch item.ID {
+		case types.FindingIDTestAgentTimeout:
 			return "test agent invocation budget exhausted"
+		case types.FindingIDTestAgentStall:
+			return "test agent stalled"
 		}
 	}
 	return ""

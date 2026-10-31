@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestParseRovodevSSE_TextEvent(t *testing.T) {
@@ -21,7 +23,7 @@ data: {"content":"hello world"}
 
 	err := parseRovodevSSE(strings.NewReader(input), func(text string) {
 		chunks = append(chunks, text)
-	}, &usage, &latestText)
+	}, nil, &usage, &latestText)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -44,7 +46,7 @@ data: {"input_tokens":100,"output_tokens":50,"cache_read_tokens":30,"cache_write
 	var usage TokenUsage
 	var latestText string
 
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -79,7 +81,7 @@ data: {"content":"after tool"}
 
 	err := parseRovodevSSE(strings.NewReader(input), func(text string) {
 		chunks = append(chunks, text)
-	}, &usage, &latestText)
+	}, nil, &usage, &latestText)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -109,7 +111,7 @@ func TestParseRovodevSSE_EventKindFallback(t *testing.T) {
 	var usage TokenUsage
 	var latestText string
 
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -129,7 +131,7 @@ data: {"input_tokens":100,"output_tokens":30}
 	var usage TokenUsage
 	var latestText string
 
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -152,7 +154,7 @@ data: {"index":0,"part":{"content":"hello","part_kind":"text"},"event_kind":"par
 
 	err := parseRovodevSSE(strings.NewReader(input), func(text string) {
 		chunks = append(chunks, text)
-	}, &usage, &latestText)
+	}, nil, &usage, &latestText)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -182,7 +184,7 @@ data: {"index":0,"delta":{"content_delta":",\"summary\":\"done\"}","part_delta_k
 
 	err := parseRovodevSSE(strings.NewReader(input), func(text string) {
 		chunks = append(chunks, text)
-	}, &usage, &latestText)
+	}, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -222,7 +224,7 @@ data: {"index":0,"part":{"content":"{\"success\":true}","part_kind":"text"},"eve
 	var usage TokenUsage
 	var latestText string
 
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -241,7 +243,7 @@ data: {"index":0,"delta":{"content_delta":"orphan","part_delta_kind":"text"},"ev
 	var usage TokenUsage
 	var latestText string
 
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -261,7 +263,7 @@ data: {"index":0,"delta":{"content_delta":" world\n","part_delta_kind":"text"},"
 	var usage TokenUsage
 	var latestText string
 
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -293,7 +295,7 @@ func TestParseRovodevSSE_GnhfFixture(t *testing.T) {
 
 	var usage TokenUsage
 	var latestText string
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -316,12 +318,53 @@ func TestParseRovodevSSE_GnhfFixture(t *testing.T) {
 	}
 }
 
+// TestParseRovodevSSE_ToolAndTextEventsAreActivity covers the liveness signal
+// rovodev emits: it is not a native subprocess, so its event stream is the only
+// evidence that a turn is working. A tool phase streams no text, so its tool
+// events must count, or a tool-only turn reads as silent and a stall window
+// retries it, replaying its tool side effects. Usage and prompt echoes are not
+// the model working.
+func TestParseRovodevSSE_ToolAndTextEventsAreActivity(t *testing.T) {
+	input := strings.Join([]string{
+		"event: user-prompt",
+		`data: {"content":"test","part_kind":"user-prompt"}`,
+		"",
+		"event: request-usage",
+		`data: {"input_tokens":10,"output_tokens":4}`,
+		"",
+		"event: on_call_tools_start",
+		`data: {"parts":[{"tool_name":"bash"}]}`,
+		"",
+		"event: tool-return",
+		`data: {"content":"ok"}`,
+		"",
+		"event: part_start",
+		`data: {"index":0,"part":{"content":"","part_kind":"tool-call"},"event_kind":"part_start"}`,
+		"",
+		"event: part_delta",
+		`data: {"index":0,"delta":{"content_delta":"","part_delta_kind":"tool_call"},"event_kind":"part_delta"}`,
+		"",
+		"event: text",
+		`data: {"content":"done"}`,
+		"",
+	}, "\n")
+	var usage TokenUsage
+	var latestText string
+	activity := 0
+	if err := parseRovodevSSE(strings.NewReader(input), nil, func() { activity++ }, &usage, &latestText); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if activity != 5 {
+		t.Fatalf("activity = %d, want one per tool, part, and text event (5)", activity)
+	}
+}
+
 func TestParseRovodevSSE_EmptyData(t *testing.T) {
 	input := "event: text\ndata: \n\n"
 	var usage TokenUsage
 	var latestText string
 
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -513,6 +556,70 @@ func TestRovodevAgent_FullFlow(t *testing.T) {
 	// Verify steps: create session, set prompt, set message, stream, delete
 	if step < 4 {
 		t.Errorf("expected at least 4 API calls, got %d", step)
+	}
+}
+
+// TestRovodevAgent_ToolOnlyTurnReachesOnLifecycleAsThrottledActivity proves
+// the adapter turns a tool phase that streams no text into
+// LifecyclePhaseActivity, which is what keeps a working rovodev turn from
+// reading as one that never started.
+func TestRovodevAgent_ToolOnlyTurnReachesOnLifecycleAsThrottledActivity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v3/sessions/create" && r.Method == http.MethodPost:
+			fmt.Fprint(w, `{"session_id":"s-act"}`)
+		case r.URL.Path == "/v3/set_chat_message" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+		case r.URL.Path == "/v3/stream_chat" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "event: on_call_tools_start\ndata: {\"parts\":[]}\n\n")
+			fmt.Fprint(w, "event: tool-return\ndata: {\"content\":\"ok\"}\n\n")
+			w.(http.Flusher).Flush()
+			// Then silence until the caller gives up on the turn.
+			<-r.Context().Done()
+		case r.URL.Path == "/v3/cancel" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+		case r.URL.Path == "/v3/sessions/s-act" && r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	a := &rovodevAgent{bin: "acli", server: &managedServer{port: mustParsePort(server.URL)}}
+	// The bound only keeps a regression from hanging the suite: with no
+	// activity reported, nothing else ends the silent stream.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var (
+		mu       sync.Mutex
+		activity []LifecycleEvent
+	)
+	_, err := a.Run(ctx, RunOpts{
+		Prompt: "work",
+		CWD:    t.TempDir(),
+		OnChunk: func(text string) {
+			t.Errorf("a tool-only turn streamed text %q", text)
+		},
+		OnLifecycle: func(event LifecycleEvent) {
+			mu.Lock()
+			activity = append(activity, event)
+			mu.Unlock()
+			// The turn showed it is working; end it the way a stall
+			// window would.
+			cancel()
+		},
+	})
+	if err == nil {
+		t.Fatal("Run() error = nil, want the cancelled turn's error")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// Two tool events inside one throttle interval are one activity signal.
+	if len(activity) != 1 || activity[0].Phase != LifecyclePhaseActivity || activity[0].Agent != "rovodev" {
+		t.Fatalf("lifecycle = %+v, want one throttled rovodev activity event", activity)
 	}
 }
 

@@ -35,6 +35,9 @@ func TestLoadGlobal_Defaults(t *testing.T) {
 	if cfg.TestAgentTimeout != DefaultTestAgentTimeout {
 		t.Errorf("test_agent_timeout = %v, want %v", cfg.TestAgentTimeout, DefaultTestAgentTimeout)
 	}
+	if cfg.TestAgentStallTimeout != DefaultTestAgentStallTimeout {
+		t.Errorf("test_agent_stall_timeout = %v, want %v", cfg.TestAgentStallTimeout, DefaultTestAgentStallTimeout)
+	}
 	if cfg.DaemonConnectTimeout != DefaultDaemonConnectTimeout {
 		t.Errorf("daemon_connect_timeout = %v, want %v", cfg.DaemonConnectTimeout, DefaultDaemonConnectTimeout)
 	}
@@ -76,6 +79,7 @@ func TestEnsureDefaultGlobalConfig_CreatesFile(t *testing.T) {
 		"review_agent_timeout:",
 		"agent_timeout:",
 		"test_agent_timeout:",
+		"test_agent_stall_timeout:",
 		"daemon_connect_timeout:",
 		"branch_sync_remote_timeout:",
 		"log_level: info",
@@ -718,6 +722,13 @@ func TestDefaultConfigYAML_MatchesGoDefaults(t *testing.T) {
 	if d != DefaultTestAgentTimeout {
 		t.Errorf("YAML test_agent_timeout = %v, Go default = %v", d, DefaultTestAgentTimeout)
 	}
+	d, err = time.ParseDuration(raw.TestAgentStallTimeout)
+	if err != nil {
+		t.Fatalf("YAML test_agent_stall_timeout %q is not a valid duration: %v", raw.TestAgentStallTimeout, err)
+	}
+	if d != DefaultTestAgentStallTimeout {
+		t.Errorf("YAML test_agent_stall_timeout = %v, Go default = %v", d, DefaultTestAgentStallTimeout)
+	}
 	if raw.LogLevel != "info" {
 		t.Errorf("YAML log_level = %q, Go default = %q", raw.LogLevel, "info")
 	}
@@ -811,5 +822,49 @@ func TestLoadGlobal_AutoFixPartial(t *testing.T) {
 	// Unset fields should remain nil
 	if cfg.AutoFix.Test != nil {
 		t.Errorf("test = %v, want nil", cfg.AutoFix.Test)
+	}
+}
+
+func TestLoadGlobal_TestAgentStallTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+		want time.Duration
+	}{
+		{"unset is the default", "log_level: info", DefaultTestAgentStallTimeout},
+		{"zero is the default", `test_agent_stall_timeout: "0"`, DefaultTestAgentStallTimeout},
+		{"zero seconds is the default", `test_agent_stall_timeout: "0s"`, DefaultTestAgentStallTimeout},
+		{"a positive value", `test_agent_stall_timeout: "4m"`, 4 * time.Minute},
+		{"a negative value is off", `test_agent_stall_timeout: "-1s"`, TestAgentStallTimeoutOff},
+		{"off", `test_agent_stall_timeout: "off"`, TestAgentStallTimeoutOff},
+		{"OFF", `test_agent_stall_timeout: " OFF "`, TestAgentStallTimeoutOff},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadGlobal(path)
+			if err != nil {
+				t.Fatalf("LoadGlobal: %v", err)
+			}
+			if cfg.TestAgentStallTimeout != tc.want {
+				t.Fatalf("test_agent_stall_timeout = %v, want %v", cfg.TestAgentStallTimeout, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadGlobal_InvalidTestAgentStallTimeout(t *testing.T) {
+	for _, data := range []string{`test_agent_stall_timeout: "soon"`, `test_agent_stall_timeout: "never"`} {
+		t.Run(data, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadGlobal(path); err == nil || !strings.Contains(err.Error(), "test_agent_stall_timeout") {
+				t.Fatalf("err = %v, want test_agent_stall_timeout rejected", err)
+			}
+		})
 	}
 }

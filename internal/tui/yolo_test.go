@@ -24,15 +24,24 @@ func TestModel_Yolo_RefusalGatesSendNoAutomaticResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stalledUnvalidatedWork, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{
+		{ID: types.FindingIDTestAgentStall, Severity: "warning", Action: types.ActionAskUser, Description: "stall cut"},
+		{ID: types.FindingIDTestAgentUnvalidatedWork, Severity: "error", Action: types.ActionAskUser, Description: "uncommitted changes to fix_test.go"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, refusal := range []struct {
+		name     string
 		step     types.StepName
 		findings string
 	}{
-		{types.StepDocument, pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "ledger.json", Rule: "ledger.json"}).Findings},
-		{types.StepTest, unvalidatedWork},
+		{"protected-path", types.StepDocument, pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "ledger.json", Rule: "ledger.json"}).Findings},
+		{"budget-cut", types.StepTest, unvalidatedWork},
+		{"stall", types.StepTest, stalledUnvalidatedWork},
 	} {
 		for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
-			t.Run(string(refusal.step)+"/"+string(status), func(t *testing.T) {
+			t.Run(refusal.name+"/"+string(status), func(t *testing.T) {
 				sock, client, snapshot := captureRespond(t)
 				run := testRun()
 				run.Steps = []ipc.StepResultInfo{{StepName: refusal.step, Status: status, FindingsJSON: &refusal.findings}}

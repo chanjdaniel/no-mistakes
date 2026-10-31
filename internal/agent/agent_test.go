@@ -527,10 +527,11 @@ func TestFinalizeTextResult_WithSchemaIgnoresNonMatchingBareJSON(t *testing.T) {
 	}
 }
 
-func TestFinalizeTextResult_WithSchemaRejectsAmbiguousBareJSON(t *testing.T) {
-	// If multiple bare JSON objects in prose validate against the schema,
-	// reject rather than silently picking the last one and discarding prior verdicts/findings.
-	text := `First verdict: {"findings":["issue 1"],"summary":"first"}. Another candidate: {"findings":[],"summary":"second"}`
+// TestFinalizeTextResult_LastValidJSONCandidateWins: an agent that prints its
+// answer twice, or revises it, means its final word. When more
+// than one candidate validates, the one that ends last in the output wins, for
+// every adapter.
+func TestFinalizeTextResult_LastValidJSONCandidateWins(t *testing.T) {
 	schema := json.RawMessage(`{
 		"type":"object",
 		"properties":{
@@ -539,12 +540,67 @@ func TestFinalizeTextResult_WithSchemaRejectsAmbiguousBareJSON(t *testing.T) {
 		},
 		"required":["findings","summary"]
 	}`)
-	_, err := finalizeTextResult("codex", text, schema, TokenUsage{})
-	if err == nil {
-		t.Fatal("expected ambiguous bare JSON to fail")
+	first := `{"findings":["issue 1"],"summary":"first"}`
+	last := `{"findings":[],"summary":"last"}`
+	fence := func(body string) string { return "```json\n" + body + "\n```" }
+	cases := []struct {
+		name string
+		text string
+		want string
+	}{
+		{name: "two identical bare objects", text: last + "\n\n" + last, want: "last"},
+		{name: "two different bare objects", text: "First: " + first + ". Then: " + last, want: "last"},
+		{name: "a fence followed by a different bare object", text: fence(first) + "\n" + last, want: "last"},
+		{name: "a bare object followed by a fence", text: first + "\n" + fence(last), want: "last"},
+		{name: "two closed fences", text: fence(first) + "\n" + fence(last), want: "last"},
+		{name: "a closed fence beats a later unclosed one", text: fence(last) + "\nAnd again:\n```json\n" + first, want: "last"},
 	}
-	if !strings.Contains(err.Error(), "multiple bare JSON objects") {
-		t.Fatalf("expected multiple bare JSON objects error, got %v", err)
+	for _, agentName := range []string{"codex", "pi", "opencode", "antigravity", "acp:omp"} {
+		for _, tc := range cases {
+			t.Run(agentName+"/"+tc.name, func(t *testing.T) {
+				result, err := finalizeTextResult(agentName, tc.text, schema, TokenUsage{})
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				var output struct {
+					Summary string `json:"summary"`
+				}
+				if err := json.Unmarshal(result.Output, &output); err != nil {
+					t.Fatalf("failed to parse output: %v", err)
+				}
+				if output.Summary != tc.want {
+					t.Fatalf("summary = %q, want %q", output.Summary, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// TestFinalizeTextResult_NoConcludingValidJSONIsARejection: last-wins never
+// adopts an object the agent went on to talk past, and output with no valid
+// candidate at all is still a structured-output rejection.
+func TestFinalizeTextResult_NoConcludingValidJSONIsARejection(t *testing.T) {
+	schema := json.RawMessage(`{
+		"type":"object",
+		"properties":{
+			"findings":{"type":"array"},
+			"summary":{"type":"string"}
+		},
+		"required":["findings","summary"]
+	}`)
+	for name, text := range map[string]string{
+		"nothing valid":                   `Here you go: {"summary":"no findings field"} and {"findings":"not an array","summary":"x"}`,
+		"the last valid object is quoted": `Example: {"findings":[],"summary":"a"}. Another: {"findings":[],"summary":"b"}. But line 42 has a nil dereference.`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := finalizeTextResult("codex", text, schema, TokenUsage{})
+			if err == nil {
+				t.Fatal("expected a parse failure")
+			}
+			if !IsStructuredOutputRejected(err) {
+				t.Fatalf("expected a structured-output rejection, got %v", err)
+			}
+		})
 	}
 }
 
@@ -721,29 +777,6 @@ Now let me actually read the diff:`
 	}
 }
 
-func TestFinalizeTextResult_ACPAgentTakesTerminalBareJSON(t *testing.T) {
-	text := `Draft: {"findings":["a"],"summary":"draft"}. Final: {"findings":["a"],"summary":"final"}`
-	schema := json.RawMessage(`{
-		"type":"object",
-		"properties":{
-			"findings":{"type":"array"},
-			"summary":{"type":"string"}
-		},
-		"required":["findings","summary"]
-	}`)
-	result, err := finalizeTextResult("acp:omp", text, schema, TokenUsage{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	var output map[string]any
-	if err := json.Unmarshal(result.Output, &output); err != nil {
-		t.Fatalf("failed to parse output: %v", err)
-	}
-	if output["summary"] != "final" {
-		t.Errorf("expected summary=final, got %v", output["summary"])
-	}
-}
-
 func TestFinalizeTextResult_WithSchemaRejectsBareJSONMissingRequiredKeys(t *testing.T) {
 	text := `I inspected the diff and found no issues. {"foo":"bar"}`
 	schema := json.RawMessage(`{
@@ -853,24 +886,6 @@ func TestFinalizeTextResult_WithSchemaParsesCodexRealWorldOutput(t *testing.T) {
 	}
 }
 
-func TestFinalizeTextResult_WithSchemaRejectsAmbiguousFencedJSON(t *testing.T) {
-	text := strings.Join([]string{
-		"```json",
-		`{"first":true}`,
-		"```",
-		"```json",
-		`{"second":true}`,
-		"```",
-	}, "\n")
-	_, err := finalizeTextResult("codex", text, json.RawMessage(`{"type":"object"}`), TokenUsage{})
-	if err == nil {
-		t.Fatal("expected ambiguous fenced JSON to fail")
-	}
-	if !strings.Contains(err.Error(), "multiple JSON code fences") {
-		t.Fatalf("expected multiple JSON code fences error, got %v", err)
-	}
-}
-
 func TestFencedJSONCandidates_IgnoreBackticksInsideJSONString(t *testing.T) {
 	text := "review complete\n```json\n{\"summary\":\"quoted ```snippet``` in markdown\",\"findings\":[]}\n```\npostlude"
 
@@ -882,8 +897,11 @@ func TestFencedJSONCandidates_IgnoreBackticksInsideJSONString(t *testing.T) {
 		t.Fatalf("expected 1 closed candidate, got %d", len(closed))
 	}
 	want := "{\"summary\":\"quoted ```snippet``` in markdown\",\"findings\":[]}\n"
-	if closed[0] != want {
-		t.Fatalf("candidate = %q, want %q", closed[0], want)
+	if closed[0].body != want {
+		t.Fatalf("candidate = %q, want %q", closed[0].body, want)
+	}
+	if wantEnd := strings.LastIndex(text, "```") + 3; closed[0].end != wantEnd {
+		t.Fatalf("candidate end = %d, want %d (just past the closing fence)", closed[0].end, wantEnd)
 	}
 }
 
@@ -898,8 +916,11 @@ func TestFencedJSONCandidates_AllowIndentedClosingFence(t *testing.T) {
 		t.Fatalf("expected 1 closed candidate, got %d", len(closed))
 	}
 	want := "{\"summary\":\"ok\",\"findings\":[]}\n"
-	if closed[0] != want {
-		t.Fatalf("candidate = %q, want %q", closed[0], want)
+	if closed[0].body != want {
+		t.Fatalf("candidate = %q, want %q", closed[0].body, want)
+	}
+	if wantEnd := strings.LastIndex(text, "```") + 3; closed[0].end != wantEnd {
+		t.Fatalf("candidate end = %d, want %d (just past the closing fence)", closed[0].end, wantEnd)
 	}
 }
 
@@ -1122,34 +1143,6 @@ func TestLastBareJSONObject_IgnoresIncidentalExamplePrecedingProse(t *testing.T)
 	}
 }
 
-func TestFinalizeTextResult_ConflictingFencedAndBareJSONReturnsError(t *testing.T) {
-	// Greptile review regression: when an agent response contains a schema-valid fenced
-	// verdict and a different schema-valid bare verdict in prose, the conflicting verdict
-	// must be rejected instead of silently picking one format over the other.
-	text := strings.Join([]string{
-		"I completed the review and found an issue:",
-		"```json",
-		`{"findings":[{"id":"BUG1","severity":"error"}],"summary":"bug found"}`,
-		"```",
-		`{"findings":[],"summary":"all clean"}`,
-	}, "\n")
-	schema := json.RawMessage(`{
-		"type":"object",
-		"properties":{
-			"findings":{"type":"array"},
-			"summary":{"type":"string"}
-		},
-		"required":["findings","summary"]
-	}`)
-	_, err := finalizeTextResult("antigravity", text, schema, TokenUsage{})
-	if err == nil {
-		t.Fatal("expected error on conflicting fenced and bare JSON verdicts")
-	}
-	if !strings.Contains(err.Error(), "conflicting JSON candidates") && !strings.Contains(err.Error(), "multiple JSON") {
-		t.Fatalf("expected conflicting/multiple JSON candidates error, got: %v", err)
-	}
-}
-
 func TestFinalizeTextResult_IdenticalFencedAndBareJSONSucceeds(t *testing.T) {
 	text := strings.Join([]string{
 		"```json",
@@ -1177,94 +1170,6 @@ func TestFinalizeTextResult_IdenticalFencedAndBareJSONSucceeds(t *testing.T) {
 	}
 	if output.Summary != "all clean" {
 		t.Errorf("expected summary='all clean', got %q", output.Summary)
-	}
-}
-
-func TestFinalizeTextResult_ConflictingLargeIntegerVerdictsReturnError(t *testing.T) {
-	text := strings.Join([]string{
-		"```json",
-		`{"value":9007199254740992}`,
-		"```",
-		`{"value":9007199254740993}`,
-	}, "\n")
-	schema := json.RawMessage(`{
-		"type":"object",
-		"properties":{"value":{"type":"integer"}},
-		"required":["value"]
-	}`)
-	_, err := finalizeTextResult("antigravity", text, schema, TokenUsage{})
-	if err == nil {
-		t.Fatal("expected distinct large integer verdicts to conflict")
-	}
-	if !strings.Contains(err.Error(), "conflicting JSON candidates") {
-		t.Fatalf("expected conflicting JSON candidates error, got %v", err)
-	}
-}
-
-func TestFinalizeTextResult_IdenticalNumericSpellingSucceeds(t *testing.T) {
-	text := strings.Join([]string{
-		"```json",
-		`{"confidence":1}`,
-		"```",
-		`{"confidence":1.0}`,
-	}, "\n")
-	schema := json.RawMessage(`{
-		"type":"object",
-		"properties":{"confidence":{"type":"number"}},
-		"required":["confidence"]
-	}`)
-	result, err := finalizeTextResult("antigravity", text, schema, TokenUsage{})
-	if err != nil {
-		t.Fatalf("expected equivalent numeric verdicts to succeed, got %v", err)
-	}
-	var output map[string]any
-	if err := json.Unmarshal(result.Output, &output); err != nil {
-		t.Fatalf("failed to unmarshal output: %v", err)
-	}
-	if output["confidence"] != float64(1) {
-		t.Fatalf("confidence = %v, want 1", output["confidence"])
-	}
-}
-
-func TestFinalizeTextResult_EquivalentLargeExponentVerdictsSucceed(t *testing.T) {
-	text := strings.Join([]string{
-		"```json",
-		`{"confidence":1e1000001}`,
-		"```",
-		`{"confidence":10e1000000}`,
-	}, "\n")
-	schema := json.RawMessage(`{
-		"type":"object",
-		"properties":{"confidence":{"type":"number"}},
-		"required":["confidence"]
-	}`)
-	result, err := finalizeTextResult("antigravity", text, schema, TokenUsage{})
-	if err != nil {
-		t.Fatalf("expected equivalent large-exponent verdicts to succeed, got %v", err)
-	}
-	if string(result.Output) != `{"confidence":1e1000001}` {
-		t.Fatalf("unexpected output: %s", string(result.Output))
-	}
-}
-
-func TestFinalizeTextResult_DistinctLargeExponentVerdictsConflict(t *testing.T) {
-	text := strings.Join([]string{
-		"```json",
-		`{"confidence":1e1000001}`,
-		"```",
-		`{"confidence":2e1000001}`,
-	}, "\n")
-	schema := json.RawMessage(`{
-		"type":"object",
-		"properties":{"confidence":{"type":"number"}},
-		"required":["confidence"]
-	}`)
-	_, err := finalizeTextResult("antigravity", text, schema, TokenUsage{})
-	if err == nil {
-		t.Fatal("expected distinct large-exponent verdicts to conflict")
-	}
-	if !strings.Contains(err.Error(), "conflicting JSON candidates") {
-		t.Fatalf("expected conflicting JSON candidates error, got %v", err)
 	}
 }
 
