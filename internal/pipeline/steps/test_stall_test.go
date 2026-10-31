@@ -159,6 +159,13 @@ func TestTestStep_EvidenceAgentThatWentSilentAfterActivityParksWithoutARetry(t *
 			<-ctx.Done()
 			return nil, ctx.Err()
 		}},
+		// rovodev's tool phase streams no text; its tool events reach the
+		// watch only as activity, and a retry would replay the tools.
+		{"tool activity with no text", func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			opts.OnLifecycle(agent.LifecycleEvent{Agent: "rovodev", Phase: agent.LifecyclePhaseActivity, Message: "rovodev producing output"})
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

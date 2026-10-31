@@ -668,7 +668,7 @@ It bounds only the Test step, and no other step or environment variable override
 
 Liveness window for one Test-step agent invocation: the evidence-gathering turn, each correction turn, and a Test-repair turn.
 An invocation that shows no activity for this long is cut as a stall instead of holding the run for the whole [`test_agent_timeout`](#test_agent_timeout).
-Activity is streamed assistant text or the agent's own liveness signal: bytes on a native agent's output, or a text, reasoning, or tool event of the turn's own session for opencode.
+Activity is streamed assistant text or the agent's own liveness signal: bytes on a native agent's output, a text, reasoning, or tool event of the turn's own session for opencode, or a text, part, or tool event of the turn's stream for rovodev.
 An opencode session status, which is how opencode reports a provider retry, is not activity.
 A stall before any activity is retried once with the same request, because nothing ran that a replay could repeat.
 A stall after any activity, or a second stall, parks the step for a decision with the ask-user finding `test-agent-stall` and the measured activity.

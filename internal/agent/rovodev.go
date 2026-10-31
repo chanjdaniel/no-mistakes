@@ -74,7 +74,7 @@ func (a *rovodevAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 
 	// Stream chat response
 	var usage TokenUsage
-	text, err := a.streamChat(ctx, baseURL, sessionID, opts.OnChunk, &usage)
+	text, err := a.streamChat(ctx, baseURL, sessionID, opts.OnChunk, nativeAgentActivityObserver(opts, a.Name()), &usage)
 	if err != nil {
 		// Best-effort cancel on error
 		a.cancelSession(baseURL, sessionID)
@@ -159,7 +159,7 @@ func (a *rovodevAgent) setChatMessage(ctx context.Context, baseURL, sessionID, m
 	return nil
 }
 
-func (a *rovodevAgent) streamChat(ctx context.Context, baseURL, sessionID string, onChunk func(string), usage *TokenUsage) (string, error) {
+func (a *rovodevAgent) streamChat(ctx context.Context, baseURL, sessionID string, onChunk func(string), onActivity func(), usage *TokenUsage) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v3/stream_chat", nil)
 	if err != nil {
 		return "", fmt.Errorf("rovodev stream request: %w", err)
@@ -179,7 +179,7 @@ func (a *rovodevAgent) streamChat(ctx context.Context, baseURL, sessionID string
 	}
 
 	var latestText string
-	err = parseRovodevSSE(resp.Body, onChunk, usage, &latestText)
+	err = parseRovodevSSE(resp.Body, onChunk, onActivity, usage, &latestText)
 	return latestText, err
 }
 
@@ -256,7 +256,12 @@ type rovodevSSEDelta struct {
 //
 // Tool activity ("tool-return", "on_call_tools_start") resets the buffer so
 // only the final post-tool text segment is returned as the structured answer.
-func parseRovodevSSE(r io.Reader, onChunk func(string), usage *TokenUsage, latestText *string) error {
+//
+// onActivity, when set, is called for every text, part, and tool event: the
+// stream carries only this session's turn, and a tool phase streams no text,
+// so without its tool events a working turn would read as silent. Usage and
+// prompt echoes are not the model working and do not count.
+func parseRovodevSSE(r io.Reader, onChunk func(string), onActivity func(), usage *TokenUsage, latestText *string) error {
 	var parts []string
 	partIndex := map[int]int{}
 	var hasEmittedText, hadToolActivity bool
@@ -294,6 +299,12 @@ func parseRovodevSSE(r io.Reader, onChunk func(string), usage *TokenUsage, lates
 		}
 		if kind == "" && payload.EventKind != "" {
 			kind = payload.EventKind
+		}
+		switch kind {
+		case "text", "part_start", "part_delta", "tool-return", "on_call_tools_start":
+			if onActivity != nil {
+				onActivity()
+			}
 		}
 
 		switch kind {
