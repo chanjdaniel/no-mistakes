@@ -56,6 +56,7 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 		if props != nil && props.SessionID != "" && props.SessionID != state.sessionID {
 			return true
 		}
+		state.observeActivity(payload.Type, props)
 
 		switch payload.Type {
 		case "session.error":
@@ -163,6 +164,21 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 		// will provide the final result
 	}
 	return nil
+}
+
+// observeActivity reports liveness for a text, reasoning, or tool event of the
+// turn's own session. Events without the session (server heartbeats) and
+// session status are not activity: opencode reports a provider retry as
+// status while nothing is produced, and a stall window must still see that
+// as silence.
+func (s *opencodeStreamState) observeActivity(eventType string, props *opencodeStreamEventProperties) {
+	if s.onActivity == nil || props == nil || props.SessionID != s.sessionID {
+		return
+	}
+	switch eventType {
+	case "message.part.delta", "message.part.updated":
+		s.onActivity()
+	}
 }
 
 // noteServed keeps an assistant message's model identity. A message without

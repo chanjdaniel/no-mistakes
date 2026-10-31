@@ -109,6 +109,46 @@ func TestOpencodeAgent_FullFlow(t *testing.T) {
 	}
 }
 
+// TestOpencodeAgent_StreamEventsReachOnLifecycleAsThrottledActivity proves the
+// adapter turns its own session's events into LifecyclePhaseActivity, which is
+// what keeps a busy opencode turn from reading as a stalled one.
+func TestOpencodeAgent_StreamEventsReachOnLifecycleAsThrottledActivity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/session" && r.Method == http.MethodPost:
+			fmt.Fprint(w, `{"id":"s-act"}`)
+		case r.URL.Path == "/global/event" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			for _, status := range []string{"running", "completed"} {
+				fmt.Fprintf(w, "data: {\"payload\":{\"type\":\"message.part.updated\",\"properties\":{\"sessionID\":\"s-act\",\"part\":{\"id\":\"t1\",\"messageID\":\"m1\",\"type\":\"tool\",\"state\":{\"status\":%q}}}}}\n\n", status)
+			}
+			fmt.Fprint(w, "data: {\"payload\":{\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"s-act\"}}}\n\n")
+		case r.URL.Path == "/session/s-act/message" && r.Method == http.MethodPost:
+			fmt.Fprint(w, `{"info":{"id":"m1","role":"assistant"},"parts":[{"type":"text","text":"ok"}]}`)
+		case r.URL.Path == "/session/s-act" && r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	a := &opencodeAgent{bin: "opencode", server: &managedServer{port: mustParsePort(server.URL)}}
+	var activity []LifecycleEvent
+	if _, err := a.Run(context.Background(), RunOpts{
+		Prompt:      "work",
+		CWD:         t.TempDir(),
+		OnLifecycle: func(event LifecycleEvent) { activity = append(activity, event) },
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Two tool events inside one throttle interval are one activity signal.
+	if len(activity) != 1 || activity[0].Phase != LifecyclePhaseActivity || activity[0].Agent != "opencode" {
+		t.Fatalf("lifecycle = %+v, want one throttled opencode activity event", activity)
+	}
+}
+
 func TestOpencodeAgent_BackfillsAssistantTextWhenStreamCannotClassifyOrphans(t *testing.T) {
 	calledPaths := make(map[string]bool)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

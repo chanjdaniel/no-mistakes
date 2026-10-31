@@ -15,6 +15,8 @@ func TestMerge_GlobalOnly(t *testing.T) {
 		AgentTimeout:       15 * time.Minute,
 		TestAgentTimeout:   45 * time.Minute,
 		LogLevel:           "info",
+
+		TestAgentStallTimeout: 7 * time.Minute,
 	}
 	repo := &RepoConfig{}
 
@@ -33,6 +35,50 @@ func TestMerge_GlobalOnly(t *testing.T) {
 	}
 	if cfg.TestAgentTimeout != 45*time.Minute {
 		t.Errorf("test_agent_timeout = %v", cfg.TestAgentTimeout)
+	}
+	if cfg.TestAgentStallTimeout != 7*time.Minute {
+		t.Errorf("test_agent_stall_timeout = %v", cfg.TestAgentStallTimeout)
+	}
+}
+
+func TestConfig_TestAgentStallWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		stall, budget time.Duration
+		want          time.Duration
+		wantNoEffect  bool
+	}{
+		{name: "zero is the default", want: DefaultTestAgentStallTimeout},
+		{name: "a shorter window applies", stall: 2 * time.Minute, budget: 5 * time.Minute, want: 2 * time.Minute},
+		{name: "off", stall: TestAgentStallTimeoutOff},
+		{name: "any negative value is off", stall: -time.Hour},
+		{name: "a window equal to the budget has no effect", stall: 5 * time.Minute, budget: 5 * time.Minute, wantNoEffect: true},
+		{name: "a window longer than the budget has no effect", stall: 9 * time.Minute, budget: 5 * time.Minute, wantNoEffect: true},
+		{name: "the default against a short budget has no effect", budget: 5 * time.Minute, wantNoEffect: true},
+		{name: "a zero budget means the default budget", stall: 29 * time.Minute, want: 29 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{TestAgentStallTimeout: tc.stall, TestAgentTimeout: tc.budget}
+			got, noEffect := cfg.TestAgentStallWindow()
+			if got != tc.want || noEffect != tc.wantNoEffect {
+				t.Fatalf("TestAgentStallWindow() = %v, %v; want %v, %v", got, noEffect, tc.want, tc.wantNoEffect)
+			}
+		})
+	}
+	var nilCfg *Config
+	if got, noEffect := nilCfg.TestAgentStallWindow(); got != DefaultTestAgentStallTimeout || noEffect {
+		t.Fatalf("nil config window = %v, %v; want the default", got, noEffect)
+	}
+}
+
+func TestMerge_TestAgentStallTimeoutIsGlobalOnly(t *testing.T) {
+	repo, err := LoadRepoFromBytes([]byte(`test_agent_stall_timeout: "off"`))
+	if err != nil {
+		t.Fatalf("LoadRepoFromBytes: %v", err)
+	}
+	cfg := Merge(&GlobalConfig{TestAgentStallTimeout: 3 * time.Minute}, repo)
+	if cfg.TestAgentStallTimeout != 3*time.Minute {
+		t.Fatalf("test_agent_stall_timeout = %v, want the global value; a repository cannot change it", cfg.TestAgentStallTimeout)
 	}
 }
 

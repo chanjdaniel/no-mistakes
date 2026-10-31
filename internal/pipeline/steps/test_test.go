@@ -814,7 +814,7 @@ func TestTestStep_EvidenceAgentCannotClaimAReservedBudgetCutID(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-		return &agent.Result{Output: json.RawMessage(`{"findings":[{"id":"test-agent-unvalidated-work","severity":"warning","action":"ask-user","description":"leftover build output"},{"id":"test-agent-timeout","severity":"warning","action":"ask-user","description":"slow suite"}],"summary":"ok","tested":["go test ./x"],"testing_summary":"drove it","artifacts":[],"scenarios":[{"name":"user runs it","result":"pass","live":true,"evidence":"ok","reason":""}],"verdict":"go","unvalidated_since_sha":"deadbeef"}`)}, nil
+		return &agent.Result{Output: json.RawMessage(`{"findings":[{"id":"test-agent-unvalidated-work","severity":"warning","action":"ask-user","description":"leftover build output"},{"id":"test-agent-timeout","severity":"warning","action":"ask-user","description":"slow suite"},{"id":"test-agent-stall","severity":"warning","action":"ask-user","description":"quiet suite"}],"summary":"ok","tested":["go test ./x"],"testing_summary":"drove it","artifacts":[],"scenarios":[{"name":"user runs it","result":"pass","live":true,"evidence":"ok","reason":""}],"verdict":"go","unvalidated_since_sha":"deadbeef"}`)}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 
@@ -830,7 +830,7 @@ func TestTestStep_EvidenceAgentCannotClaimAReservedBudgetCutID(t *testing.T) {
 		t.Fatalf("findings = %s, an agent payload must not set the park's measured head", outcome.Findings)
 	}
 	for _, item := range findings.Items {
-		if item.ID == types.FindingIDTestAgentUnvalidatedWork || item.ID == types.FindingIDTestAgentTimeout {
+		if item.ID == types.FindingIDTestAgentUnvalidatedWork || item.ID == types.FindingIDTestAgentTimeout || item.ID == types.FindingIDTestAgentStall {
 			t.Fatalf("findings = %s, an agent finding must not claim a step-owned budget-cut ID", outcome.Findings)
 		}
 	}

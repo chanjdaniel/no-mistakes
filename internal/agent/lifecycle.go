@@ -16,15 +16,17 @@ const (
 	// LifecyclePhaseFallback marks any fallback before a fresh agent attempt,
 	// including provider, session-resume, and structured-output fallbacks.
 	LifecyclePhaseFallback = "fallback"
-	// LifecyclePhaseActivity marks observed liveness of a running native
-	// subprocess: bytes arrived on its stdout or stderr.
+	// LifecyclePhaseActivity marks observed liveness of a running agent: bytes
+	// arrived on a native subprocess's stdout or stderr, or opencode's event
+	// stream carried a text, reasoning, or tool event of the turn's session.
 	//
 	// Start and exit alone cannot tell a wedged agent from a working one. Every
 	// adapter forwards only assistant prose to OnChunk, and an agent spends most
 	// of a long turn emitting tool events instead, so a healthy multi-minute fix
 	// round is indistinguishable from a process that is blocked before its first
 	// byte. Together with streamed assistant text, this phase supplies the
-	// measured output evidence used by invocation-timeout diagnostics.
+	// measured output evidence used by invocation-timeout diagnostics and the
+	// Test step's stall window (pipeline.WatchAgentStall).
 	LifecyclePhaseActivity = "activity"
 )
 
@@ -57,7 +59,8 @@ func emitAgentExited(opts RunOpts, name string, pid int, err error) {
 }
 
 // nativeAgentActivityObserver returns the throttled liveness callback handed to
-// startNativeAgentCommand, or nil when nobody is observing this invocation.
+// startNativeAgentCommand (and to opencode's event-stream parser), or nil when
+// nobody is observing this invocation.
 // Returning nil keeps the read path allocation-free for callers that do not
 // care (tests, eval replay).
 func nativeAgentActivityObserver(opts RunOpts, name string) func() {

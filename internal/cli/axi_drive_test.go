@@ -408,17 +408,23 @@ func TestDriveRun_YesLeavesRefusalGatesAwaitingResponse(t *testing.T) {
 		{ID: types.FindingIDTestAgentTimeout, Severity: "warning", Action: types.ActionAskUser, Description: "budget cut"},
 		{ID: types.FindingIDTestAgentUnvalidatedWork, Severity: "error", Action: types.ActionAskUser, Description: "uncommitted changes to fix_test.go"},
 	}, "Test agent exceeded its invocation budget")
+	stalledUnvalidatedWork := findingsJSON(t, []types.Finding{
+		{ID: types.FindingIDTestAgentStall, Severity: "warning", Action: types.ActionAskUser, Description: "stall cut"},
+		{ID: types.FindingIDTestAgentUnvalidatedWork, Severity: "error", Action: types.ActionAskUser, Description: "uncommitted changes to fix_test.go"},
+	}, "Test agent stalled")
 	for _, refusal := range []struct {
+		name     string
 		step     types.StepName
 		findings string
 		awaiting string
 		want     string
 	}{
-		{types.StepCI, protectedPath, "1 awaiting", "package.lock"},
-		{types.StepTest, unvalidatedWork, "2 awaiting", "fix_test.go"},
+		{"protected-path", types.StepCI, protectedPath, "1 awaiting", "package.lock"},
+		{"budget-cut", types.StepTest, unvalidatedWork, "2 awaiting", "fix_test.go"},
+		{"stall", types.StepTest, stalledUnvalidatedWork, "2 awaiting", "fix_test.go"},
 	} {
 		for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
-			t.Run(string(refusal.step)+"/"+string(status), func(t *testing.T) {
+			t.Run(refusal.name+"/"+string(status), func(t *testing.T) {
 				parked := &ipc.RunInfo{
 					ID: "run-1", Status: types.RunRunning,
 					Steps: []ipc.StepResultInfo{{StepName: refusal.step, Status: status, FindingsJSON: &refusal.findings}},
@@ -473,6 +479,18 @@ func TestGateResolution(t *testing.T) {
 			},
 			wantAction: types.ActionFix,
 			wantIDs:    []string{"review-1", "review-2"},
+		},
+		{
+			// A cut with nothing left in the worktree is answered like any
+			// ask-user gate: one fix round, which re-runs validation.
+			name: "a Test budget cut or stall is fixed once like any ask-user gate",
+			gate: stepView{
+				Name:         "test",
+				Status:       string(types.StepStatusAwaitingApproval),
+				FindingsJSON: `{"findings":[{"id":"test-agent-stall","severity":"warning","description":"stall cut","action":"ask-user"}],"summary":"Test agent stalled"}`,
+			},
+			wantAction: types.ActionFix,
+			wantIDs:    []string{types.FindingIDTestAgentStall},
 		},
 		{
 			name: "only non-actionable findings are approved",

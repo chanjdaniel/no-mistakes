@@ -128,35 +128,52 @@ func TestTestStep_VerifyApprovalOverride_MissingStepResultFailsClosed(t *testing
 
 func TestTestStep_TimeoutApprovalIsATestExceptionNotACommandWaiver(t *testing.T) {
 	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
-	findings := `{"findings":[{"id":"test-agent-timeout","severity":"warning","description":"The Test agent did not finish within its invocation budget.","action":"ask-user"}],"summary":"Test agent exceeded its invocation budget"}`
-	persistTestStepFindings(t, sctx, 0, findings)
+	for _, tc := range []struct {
+		name, findings, want string
+	}{
+		{
+			name:     "budget",
+			findings: `{"findings":[{"id":"test-agent-timeout","severity":"warning","description":"The Test agent did not finish within its invocation budget.","action":"ask-user"}],"summary":"Test agent exceeded its invocation budget"}`,
+			want:     "test agent invocation budget exhausted",
+		},
+		{
+			name:     "stall",
+			findings: `{"findings":[{"id":"test-agent-stall","severity":"warning","description":"The Test agent showed no activity for its stall window.","action":"ask-user"}],"summary":"Test agent stalled"}`,
+			want:     "test agent stalled",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+			persistTestStepFindings(t, sctx, 0, tc.findings)
 
-	unresolved, err := (&TestStep{}).VerifyApprovalOverride(sctx)
-	if err != nil {
-		t.Fatalf("VerifyApprovalOverride() error = %v", err)
-	}
-	if unresolved != "" {
-		t.Fatalf("unresolved = %q, want \"\" so a budget cut does not become a commands.test waiver", unresolved)
-	}
+			unresolved, err := (&TestStep{}).VerifyApprovalOverride(sctx)
+			if err != nil {
+				t.Fatalf("VerifyApprovalOverride() error = %v", err)
+			}
+			if unresolved != "" {
+				t.Fatalf("unresolved = %q, want \"\" so a cut does not become a commands.test waiver", unresolved)
+			}
 
-	if err := sctx.DB.SetTestApprovalReason(sctx.StepResultID, "raise the budget"); err != nil {
-		t.Fatal(err)
-	}
-	if err := sctx.DB.CompleteStep(sctx.StepResultID, 0, 1, "test.log"); err != nil {
-		t.Fatal(err)
-	}
-	sr, err := sctx.DB.GetStepResult(sctx.StepResultID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := sr.TestOverrideReason()
-	if !strings.Contains(got, "test agent invocation budget exhausted") {
-		t.Fatalf("TestOverrideReason = %q, want a Test exception for the budget cut", got)
-	}
-	if !strings.Contains(got, "raise the budget") {
-		t.Fatalf("TestOverrideReason = %q, want the operator reason", got)
+			if err := sctx.DB.SetTestApprovalReason(sctx.StepResultID, "raise the budget"); err != nil {
+				t.Fatal(err)
+			}
+			if err := sctx.DB.CompleteStep(sctx.StepResultID, 0, 1, "test.log"); err != nil {
+				t.Fatal(err)
+			}
+			sr, err := sctx.DB.GetStepResult(sctx.StepResultID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := sr.TestOverrideReason()
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("TestOverrideReason = %q, want a Test exception for the cut", got)
+			}
+			if !strings.Contains(got, "raise the budget") {
+				t.Fatalf("TestOverrideReason = %q, want the operator reason", got)
+			}
+		})
 	}
 }
 

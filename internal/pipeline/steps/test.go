@@ -18,7 +18,9 @@ import (
 )
 
 // TestStep runs baseline tests, gathers evidence for user intent, and optionally asks the agent to fix failures.
-type TestStep struct{}
+type TestStep struct {
+	stallNoticeLogged bool // the run already said its stall window has no effect
+}
 
 var _ pipeline.ApprovalOverrideVerifier = (*TestStep)(nil)
 
@@ -34,6 +36,7 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	ctx := sctx.Ctx
 	startHead := sctx.Run.HeadSHA
+	stallWindow := s.stallWindow(sctx)
 	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 	if err != nil {
 		return nil, err
@@ -110,6 +113,9 @@ Previous test findings to address:
 			Prompt:          fixPrompt,
 			FallbackSummary: "fix test failures",
 			AgentContext:    fixCtx,
+			RunAgent: func(opts agent.RunOpts) (*agent.Result, error) {
+				return runTestAgent(sctx, fixCtx, stallWindow, "agent fix tests", opts)
+			},
 			AfterAgentRun: func(*agent.Result) error {
 				newTestsFromFix = detectNewTestFiles(ctx, sctx.WorkDir)
 				return nil
@@ -118,7 +124,7 @@ Previous test findings to address:
 		cancelFix()
 		if err != nil {
 			runErr := testAgentError(fixCtx, fixTimeout, "agent fix tests", err)
-			if !errors.Is(runErr, errTestAgentTimeout) {
+			if !isTestAgentCut(runErr) {
 				return nil, runErr
 			}
 			repairCut = runErr
@@ -264,9 +270,9 @@ Rules:
 		reassessHistory,
 		agent.MemoryFilesRule,
 	)
-	findings, err := runTestAnalyzer(sctx, evidencePrompt)
+	findings, err := runTestAnalyzer(sctx, evidencePrompt, stallWindow)
 	if err != nil {
-		if errors.Is(err, errTestAgentTimeout) {
+		if isTestAgentCut(err) {
 			outcome := testAgentTimeoutOutcome(sctx, err, startHead, baselineFindings, baselineSummary, baselineExitCode)
 			outcome.FixSummary = fixSummary
 			return outcome, nil
@@ -319,7 +325,7 @@ Rules:
 // than correcting structured output.
 const testAnalyzerMaxAttempts = 3
 
-func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error) {
+func runTestAnalyzer(sctx *pipeline.StepContext, prompt string, stallWindow time.Duration) (Findings, error) {
 	current := prompt
 	var lastErr error
 	for attempt := 1; attempt <= testAnalyzerMaxAttempts; attempt++ {
@@ -332,14 +338,14 @@ func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error
 			))
 		}
 		evidenceCtx, cancel, timeout := testAgentContext(sctx)
-		result, err := sctx.RunAgentContext(evidenceCtx, agent.RunOpts{
+		result, err := runTestAgent(sctx, evidenceCtx, stallWindow, "agent run tests", agent.RunOpts{
 			Prompt:     current,
 			CWD:        sctx.WorkDir,
 			JSONSchema: testFindingsSchema,
 			OnChunk:    sctx.LogChunk,
 		})
 		runErr := testAgentError(evidenceCtx, timeout, "agent run tests", err)
-		if runErr != nil && (context.Cause(evidenceCtx) != nil || !agent.IsStructuredOutputRejected(runErr)) {
+		if runErr != nil && (context.Cause(evidenceCtx) != nil || pipeline.IsAgentStall(runErr) || !agent.IsStructuredOutputRejected(runErr)) {
 			cancel()
 			return Findings{}, runErr
 		}
@@ -546,32 +552,81 @@ func mergeNewTestFiles(fromFix, fromEvidence []string) []string {
 }
 
 func testAgentContext(sctx *pipeline.StepContext) (context.Context, context.CancelFunc, time.Duration) {
-	timeout := config.DefaultTestAgentTimeout
-	if sctx != nil && sctx.Config != nil && sctx.Config.TestAgentTimeout > 0 {
-		timeout = sctx.Config.TestAgentTimeout
-	}
+	timeout := sctx.Config.TestAgentInvocationTimeout()
 	ctx, cancel := context.WithTimeoutCause(sctx.Ctx, timeout, errTestAgentTimeout)
 	return ctx, cancel, timeout
 }
 
 var errTestAgentTimeout = errors.New("test agent timeout")
 
-// testAgentTimeoutOutcome parks the Test step when an evidence or repair
-// invocation burned its wall-clock budget. A budget cut is not a code
-// failure: the run stays alive with the worktree so leftover commits and
-// uncommitted files are not discarded, and an approval is a Test exception
-// rather than a silent green pass. Late structured output from the expired
+// isTestAgentCut reports whether a Test-agent invocation was cut by its budget
+// or its stall window, which parks the step instead of failing it.
+func isTestAgentCut(err error) bool {
+	return errors.Is(err, errTestAgentTimeout) || pipeline.IsAgentStall(err)
+}
+
+// stallWindow is this run's Test-agent stall window (0 when none is watched).
+// A configured window the invocation budget would always beat first is said
+// once per run rather than on every execution of the step.
+func (s *TestStep) stallWindow(sctx *pipeline.StepContext) time.Duration {
+	window, noEffect := sctx.Config.TestAgentStallWindow()
+	if noEffect && !s.stallNoticeLogged {
+		s.stallNoticeLogged = true
+		sctx.Log(fmt.Sprintf("test_agent_stall_timeout is not shorter than test_agent_timeout (%s), so it has no effect: the invocation budget cuts a silent Test agent first", sctx.Config.TestAgentInvocationTimeout()))
+	}
+	return window
+}
+
+// runTestAgent runs one Test-step agent invocation (an evidence, correction, or
+// repair turn) under its budget context and the stall window. A stall with no
+// activity at all since the invocation started is retried once with the same
+// request: nothing ran, so nothing replays, and Test turns never resume a
+// session. A stall after any activity, or on that retry, is returned for the
+// caller to park, because replaying a turn that may have acted is the
+// operator's decision.
+func runTestAgent(sctx *pipeline.StepContext, budget context.Context, window time.Duration, prefix string, opts agent.RunOpts) (*agent.Result, error) {
+	for retried := false; ; retried = true {
+		attempt := opts
+		ctx, watch := pipeline.WatchAgentStall(budget, window, &attempt)
+		result, err := sctx.RunAgentContext(ctx, attempt)
+		watch.Stop()
+		if !watch.Stalled() {
+			return result, err
+		}
+		if err == nil {
+			err = pipeline.ErrAgentStall
+		}
+		switch {
+		case watch.Active():
+			return nil, fmt.Errorf("%s stalled after it had already been active, so it was not retried (no activity for %s): %w", prefix, window, err)
+		case retried:
+			return nil, fmt.Errorf("%s stalled again on its automatic retry (no activity for %s): %w", prefix, window, err)
+		}
+		sctx.Log(fmt.Sprintf("%s showed no activity for %s; retrying it once with the same request...", prefix, window))
+	}
+}
+
+// testAgentTimeoutOutcome parks the Test step when an evidence, correction, or
+// repair invocation burned its wall-clock budget or was cut by its stall window
+// without a retry; the two cuts differ only in their step-owned finding. A cut
+// is not a code failure: the run stays alive with the worktree so leftover
+// commits and uncommitted files are not discarded, and an approval is a Test
+// exception rather than a silent green pass. Late structured output from the expired
 // turn is still not used as a successful result. The configured command's
 // result from this execution rides along with its exit code, so approving over
 // a failing command still needs the same waiver as any other Test gate, and a
 // fix round keeps the gate it was answering.
 func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead string, baseline []Finding, baselineSummary string, exitCode int) *pipeline.StepOutcome {
 	park := answeredTestGate(sctx)
+	stalled := pipeline.IsAgentStall(err)
 	cause := "This is a budget or provider-slowness cut, not a code failure."
+	if stalled {
+		cause = "This is a stall cut, not a code failure."
+	}
 	if exitCode != 0 || hasBlockingFindings(park.Items) || park.Verdict == types.TestVerdictNoGo || park.Verdict == types.TestVerdictInconclusive {
 		cause = "The cut does not clear the findings reported alongside it."
 	}
-	items := []Finding{{
+	cut := Finding{
 		ID:       types.FindingIDTestAgentTimeout,
 		Severity: types.FindingSeverityWarning,
 		Action:   types.ActionAskUser,
@@ -582,7 +637,20 @@ func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead st
 				"If this repository's targeted tests or evidence gathering routinely approach the default %s, raise test_agent_timeout in global config. "+
 				"Respond with fix to spend another budget: a repair turn runs only for selected findings other than this budget cut, then validation re-runs. Or abort and retry after raising the budget.",
 			err, cause, config.DefaultTestAgentTimeout),
-	}}
+	}
+	summary := "Test agent exceeded its invocation budget"
+	if stalled {
+		cut.ID = types.FindingIDTestAgentStall
+		cut.Description = fmt.Sprintf(
+			"The Test agent showed no activity for its stall window (test_agent_stall_timeout). "+
+				"Reported: %v. %s "+
+				"Only a turn that had shown no activity at all is retried automatically, once: a turn that already acted may have side effects, so it is not replayed without a decision. "+
+				"If this repository's agent legitimately runs commands that print nothing for longer than the window, raise test_agent_stall_timeout in global config or set it to off. "+
+				"Respond with fix to run validation again: a repair turn runs only for selected findings other than this stall, then validation re-runs. Or abort and retry.",
+			err, cause)
+		summary = "Test agent stalled"
+	}
+	items := []Finding{cut}
 	validatedHead := park.TestedHeadSHA
 	if validatedHead == "" {
 		validatedHead = park.UnvalidatedSinceSHA
@@ -599,9 +667,9 @@ func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead st
 			Description: "Approval is refused: the run worktree at " + sctx.WorkDir + " holds work no Test turn validated, and the steps after Test would commit and publish it. It holds " + work + ". Respond with fix to validate it, or abort.",
 		})
 	}
-	park.Summary = strings.TrimSpace(strings.Join([]string{baselineSummary, "Test agent exceeded its invocation budget"}, "\n"))
+	park.Summary = strings.TrimSpace(strings.Join([]string{baselineSummary, summary}, "\n"))
 	if park.TestingSummary == "" {
-		park.TestingSummary = "The Test agent exceeded its invocation budget before live validation completed; no evidence was gathered for this head."
+		park.TestingSummary = "The " + summary + " before live validation completed; no evidence was gathered for this head."
 	}
 	park.Items = append(append(items, baseline...), park.Items...)
 	findingsJSON, _ := json.Marshal(park)
@@ -645,10 +713,10 @@ func answeredTestGate(sctx *pipeline.StepContext) Findings {
 	return carried
 }
 
-// testBudgetCutIDs are the step-owned findings of a Test budget-cut park. They
-// are operator decisions, never defects for an agent to repair, so an agent's
-// own finding can never claim them.
-var testBudgetCutIDs = []string{types.FindingIDTestAgentTimeout, types.FindingIDTestAgentUnvalidatedWork}
+// testBudgetCutIDs are the step-owned findings of a Test budget-cut park (an
+// expired budget or a stall). They are operator decisions, never defects for an
+// agent to repair, so an agent's own finding can never claim them.
+var testBudgetCutIDs = []string{types.FindingIDTestAgentTimeout, types.FindingIDTestAgentStall, types.FindingIDTestAgentUnvalidatedWork}
 
 // onlyTestBudgetCutFindings reports whether a fix selection holds nothing but
 // a Test budget cut, which leaves the repair turn nothing to repair.
@@ -757,6 +825,10 @@ func porcelainPaths(status string) []string {
 // agent that error carries the killed subprocess's exit status and stderr, and
 // is the only account of what the process was doing when the budget ran out.
 func testAgentError(ctx context.Context, timeout time.Duration, prefix string, err error) error {
+	if pipeline.IsAgentStall(err) {
+		// runTestAgent already named the turn and the window.
+		return err
+	}
 	if timeout > 0 && errors.Is(context.Cause(ctx), errTestAgentTimeout) {
 		if err == nil {
 			err = context.Cause(ctx)

@@ -237,16 +237,16 @@ func classifyAgentRun(ctx context.Context, applied time.Duration, activity *agen
 	if cause == nil {
 		return err
 	}
-	// Only a deadline earns a diagnosis. A plain cancellation (operator abort,
-	// daemon shutdown) is already self-explanatory and must not be dressed up
-	// as an agent fault.
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	// Only a deadline or a stall window earns a diagnosis. A plain
+	// cancellation (operator abort, daemon shutdown) is already
+	// self-explanatory and must not be dressed up as an agent fault.
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(cause, ErrAgentStall) {
 		if applied > 0 && errors.Is(cause, ErrAgentTimeout) {
 			return diagnoseAgentTimeout(
 				fmt.Sprintf("agent timed out after %s", applied), activity, err, cause)
 		}
-		// The budget belongs to the caller (a Review or Test invocation).
-		// Keep its cause identity so the caller's own classifier still matches,
+		// The budget or stall window belongs to the caller (a Review or Test
+		// invocation). Keep its cause identity so the caller's own classifier still matches,
 		// and hand it the measurement plus whatever the adapter managed to say.
 		return diagnoseAgentTimeout("", activity, err, cause)
 	}
@@ -298,9 +298,9 @@ func agentReportClause(err error) string {
 }
 
 // IsAgentDeadlineError reports whether err is the diagnosis of an invocation
-// its deadline cut short. Such an error also carries the adapter's own error,
-// which may be a structured-output rejection, but a turn the deadline ended is
-// a timeout, never a formatting slip.
+// its deadline or stall window cut short. Such an error also carries the
+// adapter's own error, which may be a structured-output rejection, but a turn
+// the deadline or window ended is a timeout, never a formatting slip.
 func IsAgentDeadlineError(err error) bool {
 	var invocation *agentInvocationError
 	return errors.As(err, &invocation)

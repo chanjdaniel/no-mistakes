@@ -123,10 +123,17 @@ const FindingCategoryTestCommand = "test-command"
 // finding as a Test exception rather than a silent green pass.
 const FindingIDTestAgentTimeout = "test-agent-timeout"
 
-// FindingIDTestAgentUnvalidatedWork accompanies FindingIDTestAgentTimeout
-// when the run worktree holds commits or changes no Test turn validated. The
-// executor refuses Approve on that gate: the steps after Test would commit and
-// publish the work.
+// FindingIDTestAgentStall is the Test-step park when an evidence, correction,
+// or repair invocation showed no activity for test_agent_stall_timeout and was
+// not retried (it had been active, or its one automatic retry stalled too). It
+// is the same budget-cut park as FindingIDTestAgentTimeout with a different
+// cause, and approving it is a Test exception the same way.
+const FindingIDTestAgentStall = "test-agent-stall"
+
+// FindingIDTestAgentUnvalidatedWork accompanies FindingIDTestAgentTimeout or
+// FindingIDTestAgentStall when the run worktree holds commits or changes no
+// Test turn validated. The executor refuses Approve on that gate: the steps
+// after Test would commit and publish the work.
 const FindingIDTestAgentUnvalidatedWork = "test-agent-unvalidated-work"
 
 // Test scenario result constants: the vocabulary the test step's evidence

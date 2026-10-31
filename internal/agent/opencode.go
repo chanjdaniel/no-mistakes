@@ -238,6 +238,7 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 	state := &opencodeStreamState{
 		sessionID:  sessionID,
 		onChunk:    opts.OnChunk,
+		onActivity: nativeAgentActivityObserver(opts, a.Name()),
 		textParts:  make(map[string]*opencodeTextPart),
 		usageByMsg: make(map[string]TokenUsage),
 	}
