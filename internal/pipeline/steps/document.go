@@ -118,7 +118,7 @@ var documentFindingsSchema = json.RawMessage(`{
 const readAgainstCodeSchema = `{
 			"type": "array",
 			"items": {"type": "string"},
-			"description": "Repository-relative paths of the docs you read in full against the code they describe in this pass. Only these docs (and docs whose content you changed) may have their verified date moved."
+			"description": "Repository-relative paths of the docs you read in full against the code they describe in this pass. Only these docs may have their verified date moved."
 		}`
 
 func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
@@ -290,7 +290,7 @@ Task:
 
 Rules:
 %s
-- Move a doc's `+"`verified`"+` frontmatter date only when you read that doc in full against the code it describes in this pass, and list each such doc's path in "read_against_code"; never lower a date, and never set one later than today. Before the commit, the pipeline restores a date moved on a doc you neither listed nor edited, a lowered date, and a date later than today.
+- Move a doc's `+"`verified`"+` frontmatter date only when you read that doc in full against the code it describes in this pass, and list each such doc's path in "read_against_code"; never lower a date, and never set one later than today. Before the commit, the pipeline restores a date moved on a doc you did not list, a lowered date, and a date later than today.
 - Never write the em dash ("—"); use "-". Before the commit, the pipeline rewrites any em dash on a Markdown line you added or changed to "-".
 - The summary must be one concise sentence fragment suitable for a git commit subject.
 - Keep the summary under 10 words.%s`,

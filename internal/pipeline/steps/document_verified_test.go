@@ -158,32 +158,51 @@ func TestDocumentStep_VerifiedDateMovesOnlyOnAReportedDoc(t *testing.T) {
 	}
 }
 
-func TestDocumentStep_VerifiedDateKeptOnADocWhoseBodyTheStepEdited(t *testing.T) {
+// TestDocumentStep_EditingADocDoesNotEarnItsVerifiedDate: a doc the step
+// edited for another reason (a corrected sentence, a new page) keeps its body
+// edit, but its date moves only when the step reports reading it in full.
+func TestDocumentStep_EditingADocDoesNotEarnItsVerifiedDate(t *testing.T) {
 	t.Parallel()
 	for _, mode := range documentModes {
 		t.Run(mode.name, func(t *testing.T) {
 			t.Parallel()
 			dir, baseSHA, headSHA := seedDocs(t, map[string]string{
 				"docs/a.md": verifiedDoc("2020-01-01", "Alpha."),
+				"docs/b.md": verifiedDoc("2020-01-01", "Bravo."),
 			})
 			ag := &mockAgent{
 				name: "test",
 				runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 					writeDoc(t, dir, "docs/a.md", verifiedDoc("2021-06-15", "Alpha, corrected."))
+					writeDoc(t, dir, "docs/b.md", verifiedDoc("2021-06-15", "Bravo, corrected."))
 					writeDoc(t, dir, "docs/new.md", verifiedDoc("2021-06-15", "New page."))
-					return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"correct alpha"}`)}, nil
+					writeDoc(t, dir, "docs/new-read.md", verifiedDoc("2021-06-15", "New page, read."))
+					return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"correct docs","read_against_code":["docs/b.md","docs/new-read.md"]}`)}, nil
 				},
 			}
-			sctx, _ := newDocumentGuardContext(t, ag, dir, baseSHA, headSHA, mode.cmds, mode.fixing)
+			sctx, logs := newDocumentGuardContext(t, ag, dir, baseSHA, headSHA, mode.cmds, mode.fixing)
 
 			if _, err := (&DocumentStep{}).Execute(sctx); err != nil {
 				t.Fatal(err)
 			}
-			if got, want := committedDoc(t, dir, "docs/a.md"), verifiedDoc("2021-06-15", "Alpha, corrected."); got != want {
-				t.Errorf("docs/a.md committed as\n%s\nwant\n%s", got, want)
+			for name, want := range map[string]string{
+				"docs/a.md":        verifiedDoc("2020-01-01", "Alpha, corrected."),
+				"docs/b.md":        verifiedDoc("2021-06-15", "Bravo, corrected."),
+				"docs/new.md":      verifiedDoc("", "New page."),
+				"docs/new-read.md": verifiedDoc("2021-06-15", "New page, read."),
+			} {
+				if got := committedDoc(t, dir, name); got != want {
+					t.Errorf("%s committed as\n%s\nwant\n%s", name, got, want)
+				}
 			}
-			if got, want := committedDoc(t, dir, "docs/new.md"), verifiedDoc("2021-06-15", "New page."); got != want {
-				t.Errorf("docs/new.md committed as\n%s\nwant\n%s", got, want)
+			joined := strings.Join(*logs, "\n")
+			for _, want := range []string{
+				"docs/a.md: 2021-06-15 -> 2020-01-01 (not reported in read_against_code)",
+				"docs/new.md: 2021-06-15 -> (absent) (not reported in read_against_code)",
+			} {
+				if !strings.Contains(joined, want) {
+					t.Errorf("logs missing restoration %q:\n%s", want, joined)
+				}
 			}
 		})
 	}
@@ -290,8 +309,8 @@ func TestDocumentStep_UnreadableOutputRestoresEveryMovedDate(t *testing.T) {
 			if got, want := committedDoc(t, dir, "docs/a.md"), verifiedDoc("2020-01-01", "Alpha."); got != want {
 				t.Errorf("docs/a.md committed as\n%s\nwant\n%s", got, want)
 			}
-			// A body edit still earns its date without a readable output.
-			if got, want := committedDoc(t, dir, "docs/b.md"), verifiedDoc("2021-06-15", "Bravo, corrected."); got != want {
+			// A body edit is kept, but it does not earn the date.
+			if got, want := committedDoc(t, dir, "docs/b.md"), verifiedDoc("2020-01-01", "Bravo, corrected."); got != want {
 				t.Errorf("docs/b.md committed as\n%s\nwant\n%s", got, want)
 			}
 		})
@@ -323,6 +342,15 @@ func TestDocumentStep_PromptMovesVerifiedDatesOnlyOnARead(t *testing.T) {
 			} {
 				if !strings.Contains(prompt, want) {
 					t.Errorf("prompt missing %q:\n%s", want, prompt)
+				}
+			}
+			// Editing a doc is not reading it, so neither the rule nor the
+			// schema offers an edit as a reason to move its date.
+			for _, text := range []string{prompt, string(ag.calls[0].JSONSchema)} {
+				for _, banned := range []string{"nor edited", "content you changed"} {
+					if strings.Contains(text, banned) {
+						t.Errorf("prompt or schema still exempts edited docs (%q)", banned)
+					}
 				}
 			}
 		})

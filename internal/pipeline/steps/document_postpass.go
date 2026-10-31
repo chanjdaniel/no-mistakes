@@ -252,8 +252,9 @@ func rewriteEmDash(line string) (string, int) {
 // `verified` date restored to the starting value (or removed when it was
 // absent) when the step moved or introduced a date it may not set: on a doc
 // outside the read set, earlier than the starting date, or later than today.
-// The read set is the reported docs plus every doc whose content outside that
-// line the step changed. A file without a dated top-level key is untouched.
+// The read set is only the docs the agent reported reading in full: editing a
+// doc for another reason does not earn its date. A file without a dated
+// top-level key is untouched.
 func guardVerifiedDate(sctx *pipeline.StepContext, edit markdownEdit, readSet map[string]bool, today string) []byte {
 	afterLines := splitLinesKeepEnds(string(edit.after))
 	afterIdx, afterValue := frontmatterVerified(afterLines)
@@ -268,7 +269,7 @@ func guardVerifiedDate(sctx *pipeline.StepContext, edit markdownEdit, readSet ma
 
 	reason := ""
 	switch {
-	case !readSet[edit.path] && !bodyChanged(edit, beforeLines, beforeIdx, afterLines, afterIdx):
+	case !readSet[edit.path]:
 		reason = "not reported in read_against_code"
 	case beforeIdx >= 0 && isVerifiedDate(beforeValue) && afterValue < beforeValue:
 		reason = "earlier than the date it replaced"
@@ -288,25 +289,6 @@ func guardVerifiedDate(sctx *pipeline.StepContext, edit markdownEdit, readSet ma
 	}
 	sctx.Log(fmt.Sprintf("restored verified date in %s: %s -> %s (%s)", edit.path, afterValue, oldValue, reason))
 	return []byte(strings.Join(restored, ""))
-}
-
-// bodyChanged reports whether the step changed the file anywhere other than
-// its `verified` line; a new file counts as changed.
-func bodyChanged(edit markdownEdit, beforeLines []string, beforeIdx int, afterLines []string, afterIdx int) bool {
-	if edit.absent {
-		return true
-	}
-	return withoutLine(beforeLines, beforeIdx) != withoutLine(afterLines, afterIdx)
-}
-
-func withoutLine(lines []string, idx int) string {
-	var b strings.Builder
-	for i, line := range lines {
-		if i != idx {
-			b.WriteString(line)
-		}
-	}
-	return b.String()
 }
 
 // frontmatterVerified finds the top-level `verified:` key in a leading YAML
